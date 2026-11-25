@@ -145,11 +145,11 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
   try {
     await sock.sendPresenceUpdate('recording', remoteJid).catch(() => {});
 
-    const songResult = await findSongOrAdapt(query, {
-      originalClip: !forceAiSing,
-    });
+    const songResult = await findSongOrAdapt(query);
 
     const ytLink = songResult.youtubeSongVideo?.url || null;
+    const spLink = songResult.spotifyUrl || null;
+    const smLink = songResult.smuleUrl || null;
 
     let infoText = '';
     if (songResult.found && !forceAiSing) {
@@ -158,16 +158,18 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
         `• *Tajuk:* ${songResult.title}\n` +
         `• *Artis:* ${songResult.artist}\n` +
         `• *Sumber:* ${songResult.source}\n` +
+        (spLink ? `• *Spotify:* ${spLink}\n` : '') +
+        (smLink ? `• *Smule:* ${smLink}\n` : '') +
         (ytLink ? `• *YouTube:* ${ytLink}\n` : '') +
         `\n📜 *Lirik:*\n_${songResult.lyricsText}_\n\n` +
-        `🎧 _Memuat turun audio lagu sebenar..._`;
+        `🎧 _Melangkau intro & memuat turun bahagian nyanyian..._`;
     } else {
       infoText =
-        `✨ *Mencipta Lagu & Nyanyian AI Studio Sebenar...*\n` +
-        `• *Enjin AI:* ACE-Step / DiffRhythm (Vokal & Band Penuh)\n` +
+        `✨ *Mencipta Nyanyian AI Studio Sebenar...*\n` +
+        `• *Enjin AI:* ACE-Step v1.5 / YuE2-3B\n` +
         (songResult.found ? `• *Rujukan Lagu:* ${songResult.title}\n` : '') +
         `\n📜 *Lirik:*\n_${songResult.lyricsText}_\n\n` +
-        `🎙️ _Menjana nyanyian studio (±15–30 saat)..._`;
+        `🎙️ _Menjana nyanyian terus masuk lirik..._`;
     }
 
     await sendTracked(remoteJid, { text: infoText }, { quoted: msg });

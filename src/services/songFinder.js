@@ -1,6 +1,11 @@
 const { SONGS_DB } = require('../data/songsDb');
 const { searchYouTubeSongAndKaraoke } = require('./youtubeAudio');
-const { searchGeniusLyrics, searchWebLyricsSnippet } = require('./webLyricsSearch');
+const {
+  searchSpotifyTrack,
+  searchSmuleLyrics,
+  searchGeniusLyrics,
+  searchWebLyricsSnippet,
+} = require('./webLyricsSearch');
 
 function normalizeText(text) {
   return String(text || '')
@@ -87,35 +92,100 @@ function computeSimilarity(query, candidate) {
   return Math.max(diceRaw, dicePhon, tokOverlap * 0.92);
 }
 
-function searchLocalSongs(query) {
-  let bestSong = null;
-  let bestScore = 0;
+/**
+ * Bersihkan tajuk bergaya YouTube ("Ed Sheeran - Perfect (Lyrics) [Baby Im Dancing...]",
+ * "Komang - Raim Laode Feat ...") supaya mendapat tajuk lagu & artis sebenar untuk carian audio rasmi.
+ */
+function cleanCanonicalTitleArtist(rawTitle, rawArtist) {
+  let title = String(rawTitle || '')
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, '')
+    .replace(/\b(official|lyric|lyrics|lirik|video|audio|hd|mv|4k)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  let artist = String(rawArtist || '').trim();
 
-  for (const song of SONGS_DB) {
-    const candidates = [
-      song.title,
-      `${song.title} ${song.artist}`,
-      ...(song.aliases || []),
-      ...song.phrases.map((p) => p.text),
-      song.phrases.map((p) => p.text).join(' '),
-    ];
+  // Jika tajuk mengandungi pemisah " - " (cth. "Ed Sheeran - Perfect" atau "Komang - Raim Laode")
+  const parts = title.split(/\s*[-–—|]\s*/).filter(Boolean);
+  if (parts.length >= 2) {
+    const p0 = parts[0].trim();
+    const p1 = parts[1].replace(/\b(feat\.?|ft\.?)\b.*$/i, '').trim();
+    const normArt = normalizeText(artist);
 
-    for (const cand of candidates) {
-      const score = computeSimilarity(query, cand);
-      if (score > bestScore) {
-        bestScore = score;
-        bestSong = song;
-      }
+    if (normArt && normalizeText(p1).includes(normArt)) {
+      // Format "Komang - Raim Laode" -> tajuk di kiri
+      title = p0;
+    } else if (normArt && normalizeText(p0).includes(normArt)) {
+      // Format "Ed Sheeran - Perfect" -> tajuk di kanan
+      title = p1;
+    } else if (/\b(ch\.?|tv|music|lyrics?|lirik|official|channel|records)\b/i.test(artist) || !artist) {
+      // Artis ialah nama saluran YouTube (cth. "Kinz Ch.") -> ambil artis dari kiri, tajuk dari kanan
+      artist = p0;
+      title = p1;
+    } else {
+      title = p0;
     }
   }
 
-  if (bestSong && bestScore >= 0.64) {
-    return { song: bestSong, score: bestScore };
-  }
-  return null;
+  return {
+    title: title || rawTitle,
+    artist: artist || rawArtist,
+  };
 }
 
-async function fetchJson(url, timeoutMs = 2600) {
+/**
+ * Semak sama ada nama artis daripada Deezer/iTunes benar-benar sepadan dengan artis asal
+ * (elak memainkan versi DJ/remix/cover artis lain yang ada intro panjang!).
+ */
+function artistMatchesExpected(candidateArtist, expectedArtist) {
+  if (!expectedArtist || /tidak diketahui|lagu rakyat|bot nyanyi/i.test(expectedArtist)) {
+    return true;
+  }
+  const cleanExp = expectedArtist.split(/[(&,]/)[0].trim();
+  const sim = computeSimilarity(cleanExp, candidateArtist || '');
+  return sim >= 0.45;
+}
+
+/**
+ * Hurai lirik terselaras LRC (`[mm:ss.xx] baris lirik`) untuk mendapatkan saat tepat
+ * bahagian nyanyian yang diminta pengguna (atau baris nyanyian pertama untuk melangkau intro!).
+ */
+function parseSyncedLyricsTimestamp(syncedLyrics, query) {
+  if (!syncedLyrics) return { startSec: null, lines: [] };
+
+  const entries = [];
+  for (const rawLine of String(syncedLyrics).split(/\r?\n/)) {
+    const m = rawLine.match(/^\[(\d{1,2}):(\d{2}(?:\.\d+)?)\]\s*(.*)$/);
+    if (!m) continue;
+    const sec = parseInt(m[1], 10) * 60 + parseFloat(m[2]);
+    const text = m[3].trim();
+    if (text.length >= 3 && !/^(music|instrumental|intro|♪|♫|\.+)$/i.test(text)) {
+      entries.push({ sec, text });
+    }
+  }
+
+  if (!entries.length) return { startSec: null, lines: [] };
+
+  // Cari baris yang paling sepadan dengan lirik yang pengguna taip
+  let bestIdx = 0;
+  let bestScore = 0;
+  for (let i = 0; i < entries.length; i++) {
+    const s = computeSimilarity(query, entries[i].text);
+    if (s > bestScore) {
+      bestScore = s;
+      bestIdx = i;
+    }
+  }
+
+  // Jika pengguna taip petikan lirik tertentu (padanan >= 0.55), terus lompat ke saat baris itu!
+  // Jika pengguna taip tajuk lagu sahaja, terus lompat ke saat nyanyian baris pertama (elak intro)!
+  const chosenIdx = bestScore >= 0.55 ? bestIdx : 0;
+  const startSec = entries[chosenIdx].sec;
+  const lines = entries.slice(chosenIdx, chosenIdx + 4).map((e) => e.text);
+
+  return { startSec, lines };
+}
+
+async function fetchJson(url, timeoutMs = 2800) {
   const controller = new AbortController();
   let timer;
   const timeoutPromise = new Promise((resolve) => {
@@ -144,17 +214,26 @@ async function fetchJson(url, timeoutMs = 2600) {
 
 async function searchLrclib(query) {
   const url = `https://lrclib.net/api/search?q=${encodeURIComponent(query)}`;
-  const data = await fetchJson(url, 2800);
+  const data = await fetchJson(url, 3000);
   if (!Array.isArray(data) || !data.length) return null;
 
   let best = null;
   let bestScore = 0;
 
-  for (const item of data.slice(0, 8)) {
-    const titleScore = computeSimilarity(query, `${item.trackName || ''} ${item.artistName || ''}`);
-    const lyricsText = (item.plainLyrics || '').slice(0, 700);
+  for (const item of data.slice(0, 12)) {
+    const tName = item.trackName || '';
+    const aName = item.artistName || '';
+    const titleScore = computeSimilarity(query, `${tName} ${aName}`);
+    const lyricsText = (item.plainLyrics || '').slice(0, 900);
     const lyricsScore = lyricsText ? computeSimilarity(query, lyricsText) : 0;
-    const score = Math.max(titleScore, lyricsScore);
+    const syncBonus = item.syncedLyrics ? 0.04 : 0;
+    // Penalti pada entri LRCLIB tidak rasmi yang meniru tajuk video YouTube (cth. "(Lyrics)", "LYRIC OFFICIAL")
+    const spamPenalty = /\b(lyric|lyrics|lirik|official video|music video|karaoke|sped up|slowed|cover)\b|\[.*\]/i.test(
+      tName
+    )
+      ? 0.22
+      : 0;
+    const score = Math.max(titleScore, lyricsScore) + syncBonus - spamPenalty;
     if (score > bestScore) {
       bestScore = score;
       best = item;
@@ -165,33 +244,38 @@ async function searchLrclib(query) {
   return {
     title: best.trackName,
     artist: best.artistName,
-    lyrics: best.plainLyrics || '',
-    score: bestScore,
+    plainLyrics: best.plainLyrics || '',
+    syncedLyrics: best.syncedLyrics || '',
+    score: Math.min(1, bestScore),
     source: 'LRCLIB',
   };
 }
 
-async function searchDeezer(query) {
-  const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=5`;
-  const data = await fetchJson(url, 2500);
+async function searchDeezer(query, expectedArtist = '') {
+  const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=6`;
+  const data = await fetchJson(url, 2600);
   if (!data || !Array.isArray(data.data) || !data.data.length) return null;
 
   let best = null;
   let bestScore = 0;
 
   for (const item of data.data) {
+    if (!artistMatchesExpected(item.artist?.name, expectedArtist)) continue;
     const combined = `${item.title || ''} ${item.artist?.name || ''}`;
-    const score = Math.max(
+    let score = Math.max(
       computeSimilarity(query, item.title || ''),
       computeSimilarity(query, combined)
     );
+    if (/\b(remix|karaoke|instrumental|lullaby|8-bit)\b/i.test(item.title || '')) {
+      score -= 0.25;
+    }
     if (score > bestScore) {
       bestScore = score;
       best = item;
     }
   }
 
-  if (!best) return null;
+  if (!best || bestScore < 0.52) return null;
   return {
     title: best.title,
     artist: best.artist?.name || 'Tidak diketahui',
@@ -201,29 +285,33 @@ async function searchDeezer(query) {
   };
 }
 
-async function searchItunes(query) {
+async function searchItunes(query, expectedArtist = '') {
   const url = `https://itunes.apple.com/search?term=${encodeURIComponent(
     query
-  )}&media=music&entity=song&limit=5`;
-  const data = await fetchJson(url, 2500);
+  )}&media=music&entity=song&limit=6`;
+  const data = await fetchJson(url, 2600);
   if (!data || !Array.isArray(data.results) || !data.results.length) return null;
 
   let best = null;
   let bestScore = 0;
 
   for (const item of data.results) {
+    if (!artistMatchesExpected(item.artistName, expectedArtist)) continue;
     const combined = `${item.trackName || ''} ${item.artistName || ''}`;
-    const score = Math.max(
+    let score = Math.max(
       computeSimilarity(query, item.trackName || ''),
       computeSimilarity(query, combined)
     );
+    if (/\b(remix|karaoke|instrumental|lullaby)\b/i.test(item.trackName || '')) {
+      score -= 0.25;
+    }
     if (score > bestScore) {
       bestScore = score;
       best = item;
     }
   }
 
-  if (!best) return null;
+  if (!best || bestScore < 0.52) return null;
   return {
     title: best.trackName,
     artist: best.artistName || 'Tidak diketahui',
@@ -233,10 +321,29 @@ async function searchItunes(query) {
   };
 }
 
-function findMelodyByName(name) {
-  if (!name) return null;
-  const hit = searchLocalSongs(name);
-  return hit ? hit.song : null;
+function searchLocalFallback(query) {
+  let bestSong = null;
+  let bestScore = 0;
+
+  for (const song of SONGS_DB) {
+    const candidates = [
+      song.title,
+      ...(song.aliases || []),
+      ...song.phrases.map((p) => p.text),
+    ];
+    for (const cand of candidates) {
+      const score = computeSimilarity(query, cand);
+      if (score > bestScore) {
+        bestScore = score;
+        bestSong = song;
+      }
+    }
+  }
+
+  if (bestSong && bestScore >= 0.72) {
+    return { song: bestSong, score: bestScore };
+  }
+  return null;
 }
 
 function pickBestMelodyForText(text) {
@@ -257,16 +364,11 @@ function pickBestMelodyForText(text) {
 
   if (bestSong) return bestSong;
 
-  const defaultPool = SONGS_DB.filter((s) =>
-    ['rasa-sayang', 'sua-sue-kemoning', 'chan-mali-chan', 'burung-kakak-tua', 'lenggang-kangkung'].includes(
-      s.id
-    )
-  );
   let hash = 0;
   for (let i = 0; i < norm.length; i++) {
     hash = (hash * 31 + norm.charCodeAt(i)) >>> 0;
   }
-  return defaultPool[hash % defaultPool.length] || SONGS_DB[0];
+  return SONGS_DB[hash % SONGS_DB.length];
 }
 
 function adaptLyricsToMelody(rawText, melodySong) {
@@ -346,203 +448,224 @@ function linesToPhrases(lines, fallbackMelody) {
 }
 
 /**
- * Carian lagu & lirik sebenar (Web + Genius + LRCLIB + YouTube + Deezer + iTunes + DB Tempatan).
- * Jika tidak jumpa, sesuaikan teks menjadi lirik dan nyanyi ikut irama sebenar.
+ * Carian sejagat untuk SEBARANG lagu menggunakan rujukan:
+ * Spotify + Smule + LRCLIB (lirik terselaras bertimestamp!) + Genius + YouTube + Deezer + iTunes.
+ * Jika tiada lagu sepadan, teks disesuaikan menjadi lirik untuk dinyanyikan oleh AI Studio.
  */
-async function findSongOrAdapt(rawQuery, options = {}) {
+async function findSongOrAdapt(rawQuery) {
   const query = String(rawQuery || '').trim();
-  const forceOriginalClip = Boolean(options.originalClip);
 
-  // 1. Jika pengguna memilih irama tertentu secara manual (/nyanyi irama:...)
-  if (options.preferredMelody) {
-    const chosen = findMelodyByName(options.preferredMelody) || pickBestMelodyForText(query);
-    const adaptedPhrases = adaptLyricsToMelody(query, chosen);
-    return {
-      found: false,
-      mode: 'adapted_bot_sing',
-      title: `Lirik Suai Padan (Irama ${chosen.title})`,
-      artist: 'Bot Nyanyi WhatsApp',
-      melodySong: chosen,
-      phrases: adaptedPhrases,
-      lyricsText: adaptedPhrases.map((p) => p.text).join('\n'),
-      previewUrl: null,
-      youtubeSongVideo: null,
-      youtubeKaraokeVideo: null,
-      source: `Suai Padan → Irama ${chosen.title}`,
-      matchedFrom: query,
-    };
-  }
-
-  // 2. Semak pangkalan data lagu tempatan (termasuk lirik sebenar Sua Sue Kemuning P. Ramlee!)
-  const localHit = searchLocalSongs(query);
-  if (localHit) {
-    const song = localHit.song;
-    // Cari lagu & karaoke SEBENAR di YouTube + pratonton Deezer/iTunes secara selari!
-    const [yt, dz, it] = await Promise.all([
-      searchYouTubeSongAndKaraoke(`${song.title} ${song.artist.split('(')[0]}`, song.title),
-      searchDeezer(song.title),
-      searchItunes(song.title),
-    ]);
-
-    const previewUrl =
-      (dz && dz.previewUrl && dz.score >= 0.55 ? dz.previewUrl : null) ||
-      (it && it.previewUrl && it.score >= 0.55 ? it.previewUrl : null);
-
-    return {
-      found: true,
-      mode: forceOriginalClip ? 'real_audio_clip' : 'youtube_imitate_sing',
-      title: song.title,
-      artist: song.artist,
-      melodySong: song,
-      phrases: song.phrases,
-      lyricsText: song.phrases.map((p) => p.text).join('\n'),
-      previewUrl,
-      youtubeSongVideo: yt.songVideo,
-      youtubeKaraokeVideo: yt.karaokeVideo,
-      source: yt.songVideo
-        ? 'Lirik Sebenar + Irama YouTube'
-        : previewUrl
-          ? 'Lirik Sebenar + Audio Sebenar'
-          : 'Pangkalan Data Lirik & Irama Sebenar',
-      confidence: Math.round(localHit.score * 100),
-      matchedFrom: query,
-    };
-  }
-
-  // 3. Carian Lirik & Lagu Atas Talian SECARA SELARI (LRCLIB + Genius + Web Search + YouTube + Deezer + iTunes)
-  const [lrc, genius, webLyr, ytRaw, dzRaw, itRaw] = await Promise.all([
+  // 1. Carian selari merentas semua sumber utama (Spotify, Smule, LRCLIB, Genius, Web, YouTube)
+  const [spotify, smule, lrc, genius, webLyr, ytRaw] = await Promise.all([
+    searchSpotifyTrack(query),
+    searchSmuleLyrics(query),
     searchLrclib(query),
     searchGeniusLyrics(query),
     searchWebLyricsSnippet(query),
     searchYouTubeSongAndKaraoke(query),
-    searchDeezer(query),
-    searchItunes(query),
   ]);
 
-  // Tentukan identiti lagu paling tepat daripada semua sumber web
+  const localHit = searchLocalFallback(query);
+
+  // 2. Gabungkan identiti lagu paling tepat (Utamakan Spotify / LRCLIB / Smule / Genius)
   let detectedTitle = '';
   let detectedArtist = '';
   let detectedLines = [];
-  let sourceName = '';
-  let confidence = 0;
+  let vocalStartSec = null;
+  const sourcesUsed = [];
+
+  if (spotify && computeSimilarity(query, `${spotify.title} ${spotify.artist}`) >= 0.5) {
+    detectedTitle = spotify.title;
+    detectedArtist = spotify.artist;
+    sourcesUsed.push('Spotify');
+  }
 
   if (lrc) {
-    detectedTitle = lrc.title;
-    detectedArtist = lrc.artist;
-    detectedLines = extractBestLyricsLines(lrc.lyrics.split(/\r?\n/), query, 4);
-    sourceName = 'LRCLIB + YouTube';
-    confidence = Math.round(lrc.score * 100);
-  } else if (genius && computeSimilarity(query, `${genius.title} ${genius.artist} ${genius.lyricsLines.slice(0, 6).join(' ')}`) >= 0.55) {
-    detectedTitle = genius.title;
-    detectedArtist = genius.artist;
-    detectedLines = extractBestLyricsLines(genius.lyricsLines, query, 4);
-    sourceName = 'Genius Web + YouTube';
-    confidence = 85;
-  } else if (webLyr && webLyr.title && computeSimilarity(query, `${webLyr.title} ${webLyr.lyricsLines.join(' ')}`) >= 0.58) {
-    detectedTitle = webLyr.title;
-    detectedArtist = webLyr.artist || ytRaw.songVideo?.author || 'Tidak diketahui';
-    detectedLines = extractBestLyricsLines(webLyr.lyricsLines, query, 4);
-    sourceName = 'Carian Web Lirik + YouTube';
-    confidence = 80;
-  } else if (ytRaw.songVideo && computeSimilarity(query, ytRaw.songVideo.title) >= 0.62) {
-    detectedTitle = ytRaw.songVideo.title;
-    detectedArtist = ytRaw.songVideo.author;
-    sourceName = 'YouTube';
-    confidence = Math.round(computeSimilarity(query, ytRaw.songVideo.title) * 100);
-  } else {
-    const bestStream = [dzRaw, itRaw]
-      .filter((x) => x && x.score >= 0.66)
-      .sort((a, b) => b.score - a.score)[0];
-    if (bestStream) {
-      detectedTitle = bestStream.title;
-      detectedArtist = bestStream.artist;
-      sourceName = bestStream.source;
-      confidence = Math.round(bestStream.score * 100);
+    if (!detectedTitle) detectedTitle = lrc.title;
+    if (!detectedArtist) detectedArtist = lrc.artist;
+    sourcesUsed.push('LRCLIB');
+
+    const synced = parseSyncedLyricsTimestamp(lrc.syncedLyrics, query);
+    if (synced.startSec != null) {
+      vocalStartSec = synced.startSec;
+      detectedLines = synced.lines;
+    } else if (lrc.plainLyrics) {
+      detectedLines = extractBestLyricsLines(lrc.plainLyrics.split(/\r?\n/), query, 4);
     }
   }
 
-  // Jika lagu sebenar BERJAYA dikenal pasti daripada web/YouTube:
+  if (smule && (smule.lyricsLines.length || smule.title)) {
+    const smuleMatch = computeSimilarity(
+      query,
+      `${smule.title} ${smule.artist} ${smule.lyricsLines.slice(0, 6).join(' ')}`
+    );
+    if (smuleMatch >= 0.5) {
+      if (!detectedTitle && smule.title) detectedTitle = smule.title;
+      if (!detectedArtist && smule.artist) detectedArtist = smule.artist;
+      if (!detectedLines.length && smule.lyricsLines.length) {
+        detectedLines = extractBestLyricsLines(smule.lyricsLines, query, 4);
+      }
+      sourcesUsed.push('Smule');
+    }
+  }
+
+  if (genius) {
+    const gMatch = computeSimilarity(
+      query,
+      `${genius.title} ${genius.artist} ${genius.lyricsLines.slice(0, 6).join(' ')}`
+    );
+    if (gMatch >= 0.55) {
+      if (!detectedTitle) detectedTitle = genius.title;
+      if (!detectedArtist) detectedArtist = genius.artist;
+      if (!detectedLines.length && genius.lyricsLines.length) {
+        detectedLines = extractBestLyricsLines(genius.lyricsLines, query, 4);
+      }
+      sourcesUsed.push('Genius');
+    }
+  }
+
+  if (!detectedTitle && localHit) {
+    detectedTitle = localHit.song.title;
+    detectedArtist = localHit.song.artist;
+    if (!detectedLines.length) {
+      detectedLines = localHit.song.phrases.map((p) => p.text);
+    }
+    sourcesUsed.push('Katalog Klasik');
+  }
+
+  if (!detectedTitle && webLyr?.title && computeSimilarity(query, `${webLyr.title} ${webLyr.lyricsLines.join(' ')}`) >= 0.58) {
+    detectedTitle = webLyr.title;
+    detectedArtist = webLyr.artist || '';
+    if (!detectedLines.length) {
+      detectedLines = extractBestLyricsLines(webLyr.lyricsLines, query, 4);
+    }
+    sourcesUsed.push('Carian Web');
+  }
+
+  if (!detectedTitle && ytRaw.songVideo && computeSimilarity(query, ytRaw.songVideo.title) >= 0.62) {
+    // Bersihkan format tajuk YouTube "Artis - Tajuk (Lyrics) [...]" supaya dapat artis & tajuk sebenar
+    const cleanYt = ytRaw.songVideo.title
+      .replace(/\[[^\]]*\]|\([^)]*\)/g, '')
+      .replace(/\b(official|lyric|lyrics|lirik|video|audio|hd|mv|4k)\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const dashParts = cleanYt.split(/\s*[-–—|]\s*/).filter(Boolean);
+    if (dashParts.length >= 2) {
+      detectedArtist = dashParts[0].trim();
+      detectedTitle = dashParts[1].trim();
+    } else {
+      detectedTitle = cleanYt || ytRaw.songVideo.title;
+      detectedArtist = '';
+    }
+    sourcesUsed.push('YouTube');
+  }
+
+  // 3. Jika lagu sebenar dikenal pasti -> bersihkan tajuk/artis rasmi, sahkan LRCLIB,
+  //    kemudian cari video lirik YouTube & audio studio artis SEBENAR!
   if (detectedTitle) {
-    // Pastikan kita ada video YouTube & audio preview yang tepat untuk tajuk lagu sebenar ini
-    let ytFinal = ytRaw;
-    let previewUrl =
-      (dzRaw && dzRaw.previewUrl && dzRaw.score >= 0.55 ? dzRaw.previewUrl : null) ||
-      (itRaw && itRaw.previewUrl && itRaw.score >= 0.55 ? itRaw.previewUrl : null);
+    const cleanedMeta = cleanCanonicalTitleArtist(detectedTitle, detectedArtist);
+    detectedTitle = cleanedMeta.title;
+    detectedArtist = cleanedMeta.artist;
 
-    const exactTerm = `${detectedTitle} ${detectedArtist !== 'Tidak diketahui' ? detectedArtist : ''}`.trim();
+    const cleanArtistInit =
+      detectedArtist && !/tidak diketahui/i.test(detectedArtist)
+        ? detectedArtist.split(/[(&,]/)[0].trim()
+        : '';
+    const initialTerm = [detectedTitle, cleanArtistInit].filter(Boolean).join(' ');
 
-    if (!ytFinal.songVideo || !ytFinal.karaokeVideo || !previewUrl) {
-      const [ytExact, dzExact, itExact] = await Promise.all([
-        !ytFinal.songVideo || !ytFinal.karaokeVideo
-          ? searchYouTubeSongAndKaraoke(exactTerm, detectedTitle)
-          : Promise.resolve(ytFinal),
-        !previewUrl ? searchDeezer(exactTerm) : Promise.resolve(null),
-        !previewUrl ? searchItunes(exactTerm) : Promise.resolve(null),
-      ]);
+    if (!lrc) {
+      const lrcExact = await searchLrclib(initialTerm);
+      if (lrcExact) {
+        const cleanedLrc = cleanCanonicalTitleArtist(lrcExact.title, lrcExact.artist);
+        detectedTitle = cleanedLrc.title || detectedTitle;
+        detectedArtist = cleanedLrc.artist || detectedArtist;
+        if (!sourcesUsed.includes('LRCLIB')) sourcesUsed.push('LRCLIB');
 
-      if (ytExact?.songVideo) ytFinal.songVideo = ytExact.songVideo;
-      if (ytExact?.karaokeVideo) ytFinal.karaokeVideo = ytExact.karaokeVideo;
-      if (!previewUrl) {
-        previewUrl =
-          (dzExact && dzExact.previewUrl ? dzExact.previewUrl : null) ||
-          (itExact && itExact.previewUrl ? itExact.previewUrl : null);
+        const synced2 = parseSyncedLyricsTimestamp(lrcExact.syncedLyrics, query);
+        if (synced2.startSec != null) {
+          vocalStartSec = synced2.startSec;
+          if (!detectedLines.length) detectedLines = synced2.lines;
+        } else if (!detectedLines.length && lrcExact.plainLyrics) {
+          detectedLines = extractBestLyricsLines(lrcExact.plainLyrics.split(/\r?\n/), query, 4);
+        }
       }
     }
 
-    // Jika lirik belum lengkap, cuba ambil daripada Genius/web berdasarkan tajuk tepat yang ditemui
-    if (!detectedLines.length && genius?.lyricsLines?.length) {
-      detectedLines = extractBestLyricsLines(genius.lyricsLines, query, 4);
-    }
-    if (!detectedLines.length && webLyr?.lyricsLines?.length) {
-      detectedLines = extractBestLyricsLines(webLyr.lyricsLines, query, 4);
+    const cleanArtist =
+      detectedArtist && !/tidak diketahui/i.test(detectedArtist)
+        ? detectedArtist.split(/[(&,]/)[0].trim()
+        : '';
+    const exactTerm = [detectedTitle, cleanArtist].filter(Boolean).join(' ');
+
+    const [ytExact, dzExact, itExact] = await Promise.all([
+      searchYouTubeSongAndKaraoke(exactTerm, detectedTitle, cleanArtist),
+      searchDeezer(exactTerm, cleanArtist),
+      searchItunes(exactTerm, cleanArtist),
+    ]);
+
+    const bestYt = ytExact.songVideo || ytRaw.songVideo;
+    if (bestYt && !sourcesUsed.includes('YouTube')) sourcesUsed.push('YouTube');
+
+    // Ambil pratonton Deezer/iTunes HANYA jika artisnya tepat (elak DJ/remix artis lain!)
+    const previewUrl =
+      (dzExact?.previewUrl || null) ||
+      (itExact?.previewUrl || null);
+
+    if (!detectedArtist) {
+      detectedArtist = dzExact?.artist || itExact?.artist || bestYt?.author || 'Tidak diketahui';
     }
 
-    const fallbackMelody = pickBestMelodyForText(`${detectedTitle} ${detectedLines.join(' ')}`);
+    if (!detectedLines.length && localHit) {
+      detectedLines = localHit.song.phrases.map((p) => p.text);
+    }
+
+    const fallbackMelody = localHit?.song || pickBestMelodyForText(`${detectedTitle} ${detectedLines.join(' ')}`);
     const phrases = detectedLines.length
       ? linesToPhrases(detectedLines, fallbackMelody)
       : adaptLyricsToMelody(query, fallbackMelody);
 
     return {
       found: true,
-      mode: forceOriginalClip ? 'real_audio_clip' : 'youtube_imitate_sing',
+      mode: 'real_song',
       title: detectedTitle,
-      artist: detectedArtist || 'Tidak diketahui',
+      artist: detectedArtist,
       melodySong: fallbackMelody,
       phrases,
       lyricsText: phrases.map((p) => p.text).join('\n'),
+      vocalStartSec,
       previewUrl,
-      youtubeSongVideo: ytFinal.songVideo,
-      youtubeKaraokeVideo: ytFinal.karaokeVideo,
-      source: sourceName,
-      confidence,
+      spotifyUrl: spotify?.spotifyUrl || null,
+      smuleUrl: smule?.smuleUrl || null,
+      youtubeSongVideo: bestYt,
+      source: sourcesUsed.join(' + ') || 'Carian Lagu',
       matchedFrom: query,
     };
   }
 
-  // 4. Tidak jumpa lagu sebenar -> sesuaikan teks kepada lirik & nyanyi ikut irama sebenar!
+  // 4. Tidak jumpa lagu sebenar -> sesuaikan teks kepada lirik untuk dinyanyikan oleh AI Studio!
   const chosenMelody = pickBestMelodyForText(query);
   const adaptedPhrases = adaptLyricsToMelody(query, chosenMelody);
 
   return {
     found: false,
-    mode: 'adapted_bot_sing',
-    title: `Lirik Suai Padan (Irama ${chosenMelody.title})`,
-    artist: 'Bot Nyanyi WhatsApp',
+    mode: 'adapted_ai_sing',
+    title: `Lirik Suai Padan`,
+    artist: 'Bot Nyanyi AI Studio',
     melodySong: chosenMelody,
     phrases: adaptedPhrases,
     lyricsText: adaptedPhrases.map((p) => p.text).join('\n'),
+    vocalStartSec: null,
     previewUrl: null,
+    spotifyUrl: null,
+    smuleUrl: null,
     youtubeSongVideo: null,
-    youtubeKaraokeVideo: null,
-    source: `Suai Padan → Irama ${chosenMelody.title}`,
+    source: 'Suai Padan Lirik + AI Studio',
     matchedFrom: query,
   };
 }
 
 module.exports = {
   findSongOrAdapt,
-  findMelodyByName,
-  searchLocalSongs,
   adaptLyricsToMelody,
   SONGS_DB,
 };

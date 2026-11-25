@@ -39,49 +39,93 @@ function normalizeSimple(str) {
     .trim();
 }
 
-function titleMatches(videoTitle, expectedTitle) {
-  const vt = normalizeSimple(videoTitle);
-  const tokens = normalizeSimple(expectedTitle)
+function scoreYouTubeCandidate(video, expectedTitle, expectedArtist) {
+  const vt = normalizeSimple(video.title);
+  const ch = normalizeSimple(video.author?.name || '');
+  const combined = `${vt} ${ch}`;
+  let score = 0;
+
+  // Padanan tajuk lagu
+  const titleTokens = normalizeSimple(expectedTitle)
     .split(' ')
-    .filter((w) => w.length >= 3);
-  if (!tokens.length) return true;
-  let hits = 0;
-  for (const t of tokens) {
-    if (vt.includes(t)) hits++;
+    .filter((w) => w.length >= 2);
+  if (titleTokens.length) {
+    let hits = 0;
+    for (const t of titleTokens) {
+      if (vt.includes(t)) hits++;
+    }
+    score += (hits / titleTokens.length) * 50;
   }
-  return hits / tokens.length >= 0.5;
+
+  // Padanan artis (sangat penting supaya dapat penyanyi sebenar, bukan cover/DJ rawak!)
+  const artistTokens = normalizeSimple(expectedArtist)
+    .split(' ')
+    .filter((w) => w.length >= 3 && !['tan', 'sri', 'ost', 'nasib', 'tidak', 'diketahui'].includes(w));
+  if (artistTokens.length) {
+    let ahits = 0;
+    for (const a of artistTokens) {
+      if (combined.includes(a)) ahits++;
+    }
+    score += (ahits / artistTokens.length) * 30;
+  }
+
+  // Utamakan video lirik / official audio (biasanya terus masuk lagu tanpa dialog filem panjang!)
+  if (/\b(lirik|lyric|lyrics|official audio|audio)\b/i.test(video.title)) score += 18;
+  if (/\b(official)\b/i.test(video.title)) score += 6;
+
+  // Tolak video yang bukan lagu asal (karaoke, remix, cover, tutorial, babak filem panjang)
+  if (/\b(karaoke|minus one|minusone|instrumental|remix|dj|slowed|reverb|sped up|tutorial|guitar lesson|reaction)\b/i.test(video.title)) {
+    score -= 35;
+  }
+  if (/\b(cover)\b/i.test(video.title)) score -= 18;
+
+  // Tempoh lagu normal (1.5 minit hingga 6 minit) mendapat bonus
+  if (video.seconds >= 80 && video.seconds <= 360) score += 10;
+  else if (video.seconds > 420) score -= 25;
+
+  return score;
 }
 
 /**
- * Cari video lagu sebenar DAN versi karaoke/instrumental di YouTube (0 API key).
+ * Cari video lagu sebenar di YouTube — utamakan video Lirik / Official Audio artis sebenar
+ * supaya terus masuk bahagian nyanyian dan tidak tersilap lagu/cover.
  */
-async function searchYouTubeSongAndKaraoke(query, knownTitle = '') {
-  const searchTerm = knownTitle || query;
+async function searchYouTubeSongAndKaraoke(query, knownTitle = '', knownArtist = '') {
+  const cleanArtist =
+    knownArtist && !/tidak diketahui|bot nyanyi|lagu rakyat/i.test(knownArtist)
+      ? knownArtist.split(/[(&,]/)[0].trim()
+      : '';
+  const searchTerm = [knownTitle || query, cleanArtist].filter(Boolean).join(' ');
 
-  const songSearchPromise = yts(`${searchTerm} lagu official audio`)
-    .then((r) => (r?.videos || []).filter((v) => v.seconds >= 25 && v.seconds <= 600))
+  const lyricSearchPromise = yts(`${searchTerm} lirik`)
+    .then((r) => (r?.videos || []).filter((v) => v.seconds >= 30 && v.seconds <= 540))
     .catch(() => []);
 
-  const karaokeSearchPromise = yts(`${searchTerm} karaoke instrumental minus one`)
-    .then((r) => (r?.videos || []).filter((v) => v.seconds >= 25 && v.seconds <= 600))
+  const audioSearchPromise = yts(`${searchTerm} official audio`)
+    .then((r) => (r?.videos || []).filter((v) => v.seconds >= 30 && v.seconds <= 540))
     .catch(() => []);
 
-  const [songVideos, karaokeVideos] = await raceTimeout(
-    Promise.all([songSearchPromise, karaokeSearchPromise]),
-    4000,
+  const [lyricVideos, audioVideos] = await raceTimeout(
+    Promise.all([lyricSearchPromise, audioSearchPromise]),
+    4200,
     [[], []]
   );
 
-  // Pilih video lagu terbaik
-  const songVideo = songVideos[0] || null;
+  // Gabung & susun mengikut skor ketepatan artis + tajuk + video lirik
+  const seen = new Set();
+  const merged = [];
+  for (const v of [...lyricVideos.slice(0, 6), ...audioVideos.slice(0, 6)]) {
+    if (!seen.has(v.videoId)) {
+      seen.add(v.videoId);
+      merged.push({
+        video: v,
+        score: scoreYouTubeCandidate(v, knownTitle || query, cleanArtist),
+      });
+    }
+  }
+  merged.sort((a, b) => b.score - a.score);
 
-  // Pilih karaoke hanya jika tajuknya benar-benar berkaitan karaoke/instrumental + tajuk lagu
-  const karaokeVideo =
-    karaokeVideos.find(
-      (v) =>
-        /(karaoke|instrumental|minus one|minusone|off vocal|backing track)/i.test(v.title) &&
-        titleMatches(v.title, knownTitle || songVideo?.title || query)
-    ) || null;
+  const songVideo = merged[0]?.video || null;
 
   return {
     songVideo: songVideo
@@ -92,40 +136,47 @@ async function searchYouTubeSongAndKaraoke(query, knownTitle = '') {
           url: songVideo.url,
           seconds: songVideo.seconds,
           description: songVideo.description || '',
+          matchScore: Math.round(merged[0]?.score || 0),
         }
       : null,
-    karaokeVideo: karaokeVideo
-      ? {
-          videoId: karaokeVideo.videoId,
-          title: karaokeVideo.title,
-          author: karaokeVideo.author?.name || 'YouTube',
-          url: karaokeVideo.url,
-          seconds: karaokeVideo.seconds,
-        }
-      : null,
+    karaokeVideo: null,
   };
 }
 
+function formatSectionTime(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}:${String(rem).padStart(2, '0')}`;
+}
+
 /**
- * Muat turun klip 26 saat daripada YouTube menggunakan yt-dlp (pantas dengan --download-sections).
+ * Muat turun bahagian lagu daripada YouTube menggunakan yt-dlp.
+ * - Jika `startSec` (dari lirik terselaras LRCLIB) diketahui, terus lompat ke bahagian lirik!
+ * - Jika tidak diketahui, muat turun 0:00–1:05 supaya pengesan vokal (`detectVocalStartSec`)
+ *   boleh melangkau intro panjang dan memulakan nyanyian tepat bila vokal bermula!
  */
-async function downloadViaYtDlp(videoId, outPath) {
+async function downloadViaYtDlp(videoId, outPath, startSec = null) {
   const ytdlp = getYtDlpPath();
   if (!ytdlp) return false;
 
   const url = `https://www.youtube.com/watch?v=${videoId}`;
+  const section =
+    startSec != null && startSec > 1
+      ? `*${formatSectionTime(Math.max(0, startSec - 1))}-${formatSectionTime(startSec + 30)}`
+      : '*0:00-1:05';
+
   const args = [
     '--no-playlist',
     '--no-warnings',
     '-f', 'bestaudio[ext=m4a]/bestaudio/best',
-    '--download-sections', '*0:02-0:28',
+    '--download-sections', section,
     '--force-keyframes-at-cuts',
     '--extractor-args', 'youtube:player_client=android_vr,ios,web',
     '-o', outPath,
     url,
   ];
 
-  // Sokong cookies pilihan jika pengguna menetapkan YOUTUBE_COOKIES_B64 di Render
   let cookiePath = null;
   if (process.env.YOUTUBE_COOKIES_B64) {
     try {
@@ -138,7 +189,7 @@ async function downloadViaYtDlp(videoId, outPath) {
   }
 
   try {
-    await execFileAsync(ytdlp, args, { timeout: 14000, maxBuffer: 5 * 1024 * 1024 });
+    await execFileAsync(ytdlp, args, { timeout: 16000, maxBuffer: 5 * 1024 * 1024 });
     return fs.existsSync(outPath) && fs.statSync(outPath).size > 4096;
   } catch {
     return false;
@@ -153,9 +204,6 @@ async function downloadViaYtDlp(videoId, outPath) {
   }
 }
 
-/**
- * Fallback YouTube audio stream melalui API awam Piped / Invidious (tanpa yt-dlp).
- */
 const PUBLIC_YT_INSTANCES = [
   { type: 'piped', base: 'https://pipedapi.kavin.rocks' },
   { type: 'piped', base: 'https://pipedapi.adminforge.de' },
@@ -206,7 +254,7 @@ async function fetchStreamUrlFromInstance(inst, videoId) {
   }
 }
 
-async function downloadPartialUrl(url, outPath, maxBytes = 750 * 1024, timeoutMs = 5500) {
+async function downloadPartialUrl(url, outPath, maxBytes = 1400 * 1024, timeoutMs = 6000) {
   const controller = new AbortController();
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -252,23 +300,33 @@ async function downloadViaPublicInstances(videoId, outPath) {
 }
 
 /**
- * Muat turun klip audio sebenar (YouTube yt-dlp -> YouTube Piped/Invidious -> Deezer/iTunes preview).
+ * Muat turun audio lagu sebenar (YouTube yt-dlp -> YouTube Stream -> Deezer/iTunes preview).
  */
-async function fetchRealAudioFile({ videoId, previewUrl }) {
+async function fetchRealAudioFile({ videoId, previewUrl, startSec = null }) {
   fs.mkdirSync(config.TMP_DIR, { recursive: true });
   const outPath = path.join(config.TMP_DIR, `yt-${crypto.randomBytes(5).toString('hex')}.m4a`);
 
   if (videoId) {
-    const okYtDlp = await downloadViaYtDlp(videoId, outPath);
-    if (okYtDlp) return { path: outPath, source: 'YouTube (yt-dlp)' };
+    const okYtDlp = await downloadViaYtDlp(videoId, outPath, startSec);
+    if (okYtDlp) {
+      return {
+        path: outPath,
+        source: 'YouTube',
+        alreadyCutAtStartSec: Boolean(startSec != null && startSec > 1),
+      };
+    }
 
     const okPublic = await downloadViaPublicInstances(videoId, outPath);
-    if (okPublic) return { path: outPath, source: 'YouTube Stream' };
+    if (okPublic) {
+      return { path: outPath, source: 'YouTube Stream', alreadyCutAtStartSec: false };
+    }
   }
 
   if (previewUrl) {
-    const okPrev = await downloadPartialUrl(previewUrl, outPath, 1500 * 1024, 5000);
-    if (okPrev) return { path: outPath, source: 'Pratonton Audio Sebenar' };
+    const okPrev = await downloadPartialUrl(previewUrl, outPath, 1600 * 1024, 5500);
+    if (okPrev) {
+      return { path: outPath, source: 'Audio Studio Rasmi', alreadyCutAtStartSec: false };
+    }
   }
 
   return null;

@@ -21,17 +21,18 @@ function buildStylePrompt(songResult) {
   const title = (songResult.title || '').toLowerCase();
   const lyrics = (songResult.lyricsText || '').toLowerCase();
   const combined = `${title} ${lyrics}`;
+  const noIntroDirective = 'vocals start immediately at 0 seconds, no instrumental intro, straight into clear singing lyrics';
 
   if (/(kemuning|kemoning|joget|zapin|dikir|wau bulan|lenggang|chan mali|rasa sayang|kampung)/i.test(combined)) {
-    return 'classic malay traditional pop, upbeat joget rhythm, warm expressive human lead vocal singing clearly, acoustic guitar, accordion, percussion, bass, studio quality, catchy melody';
+    return `${noIntroDirective}, classic malay traditional pop, upbeat joget rhythm, warm expressive human lead vocal singing clearly, acoustic guitar, accordion, percussion, bass, studio quality`;
   }
   if (/(sedih|rindu|cinta|kasih|malam|hujan|ilhamku|solo|jiwa)/i.test(combined)) {
-    return 'emotional malay pop ballad, clear expressive human singing vocal, warm grand piano, acoustic guitar, lush strings, soft drums, studio mastering';
+    return `${noIntroDirective}, emotional malay pop ballad, clear expressive human singing vocal, warm grand piano, acoustic guitar, lush strings, soft drums, studio mastering`;
   }
   if (/(hari jadi|birthday|selamat)/i.test(combined)) {
-    return 'cheerful celebration pop, bright joyful lead vocal, acoustic guitar, piano, upbeat drums, warm studio production';
+    return `${noIntroDirective}, cheerful celebration pop, bright joyful lead vocal, acoustic guitar, piano, upbeat drums, warm studio production`;
   }
-  return 'modern malay pop, catchy upbeat melody, clear expressive human singing voice, acoustic guitar, electric piano, groovy bass, crisp drums, studio quality';
+  return `${noIntroDirective}, modern malay pop, catchy upbeat melody, clear expressive human singing voice, acoustic guitar, electric piano, groovy bass, crisp drums, studio quality`;
 }
 
 function formatSongLyrics(lyricsText) {
