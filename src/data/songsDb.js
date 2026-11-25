@@ -11,53 +11,56 @@
 const SONGS_DB = [
   {
     id: 'sua-sue-kemoning',
-    title: 'Sua Sue Kemoning',
-    artist: 'Lagu Rakyat Melayu / Klasik Nusantara',
+    title: 'Sua Sue Kemuning',
+    artist: 'Tan Sri P. Ramlee, A.R. Tompel & Ibrahim Din (OST Nasib Do Re Mi)',
     aliases: [
       'sua sue kumoning',
       'sua sue kemoning',
+      'sua sue kemuning',
       'suasue kemoning',
       'suasue kumoning',
+      'suasue kemuning',
       'sua suae kemoning',
       'sua suwe kemoning',
-      'sua sue kemuning',
-      'suwe ora jamu',
+      'istimewa raja',
+      'limau purut lebat di dahan',
+      'lapar perut dapat ku tahan',
     ],
-    moodKeywords: ['bunga', 'kemuning', 'klasik', 'tradisional', 'perak', 'rindu', 'idaman'],
+    moodKeywords: ['bunga', 'kemuning', 'klasik', 'p ramlee', 'lapar', 'do re mi', 'raja'],
     lang: 'ms',
-    tempo: 112,
+    tempo: 122,
     style: 'joget',
     phrases: [
       {
-        text: 'Sua sue kemoning, di balik daun pandan',
+        text: 'Sua sue kemuning, sua sue kemuning',
         chord: ['C3', 'E3', 'G3'],
         notes: [
-          ['E4', 0.5], ['G4', 0.5], ['A4', 1.0], ['G4', 0.5], ['E4', 0.5],
-          ['D4', 0.5], ['E4', 0.5], ['G4', 1.0], ['E4', 1.0],
+          ['G4', 0.5], ['G4', 0.5], ['A4', 0.5], ['G4', 0.5], ['E4', 0.5], ['G4', 0.5],
+          ['G4', 0.5], ['G4', 0.5], ['A4', 0.5], ['G4', 0.5], ['E4', 1.0],
         ],
       },
       {
-        text: 'Sua sue kemoning, tuan jadi idaman',
-        chord: ['F3', 'A3', 'C4'],
-        notes: [
-          ['A4', 0.5], ['C5', 0.5], ['A4', 1.0], ['G4', 0.5], ['E4', 0.5],
-          ['D4', 0.5], ['E4', 0.5], ['D4', 1.0], ['C4', 1.0],
-        ],
-      },
-      {
-        text: 'Burung terbang tinggi, di atas awan biru',
+        text: 'Sua sue kemuning, istimewa raja',
         chord: ['G3', 'B3', 'D4'],
         notes: [
-          ['G4', 0.5], ['G4', 0.5], ['A4', 0.5], ['B4', 0.5], ['C5', 1.0],
-          ['B4', 0.5], ['A4', 0.5], ['G4', 1.0], ['E4', 1.0],
+          ['G4', 0.5], ['G4', 0.5], ['A4', 0.5], ['G4', 0.5], ['E4', 0.5], ['D4', 0.5],
+          ['E4', 0.5], ['G4', 0.5], ['A4', 0.5], ['G4', 0.5], ['C5', 1.0],
         ],
       },
       {
-        text: 'Sua sue kemoning, hati rasa merindu',
+        text: 'Limau purut lebat di dahan, batang selasih condong uratnya',
+        chord: ['F3', 'A3', 'C4'],
+        notes: [
+          ['A4', 0.5], ['A4', 0.5], ['C5', 0.5], ['A4', 0.5], ['G4', 0.5], ['E4', 0.5],
+          ['G4', 0.5], ['A4', 0.5], ['G4', 0.5], ['E4', 0.5], ['D4', 1.0],
+        ],
+      },
+      {
+        text: 'Lapar perut dapat ku tahan, hati sakit apakah ubatnya',
         chord: ['C3', 'E3', 'G3'],
         notes: [
           ['E4', 0.5], ['G4', 0.5], ['A4', 0.5], ['G4', 0.5], ['E4', 0.5], ['D4', 0.5],
-          ['C4', 0.5], ['D4', 0.5], ['E4', 1.0], ['C4', 1.0],
+          ['E4', 0.5], ['G4', 0.5], ['E4', 0.5], ['D4', 0.5], ['C4', 1.5],
         ],
       },
     ],

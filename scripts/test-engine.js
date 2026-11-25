@@ -10,7 +10,7 @@ const { generateSingingAudio, getFfmpegPath } = require('../src/services/singing
 async function main() {
   console.log('FFmpeg dikesan:', getFfmpegPath());
 
-  console.log('\n--- UJIAN 1: "sua sue kumoning" ---');
+  console.log('\n--- UJIAN 1: "sua sue kumoning" (Lirik Sebenar P. Ramlee + YouTube) ---');
   const t1 = Date.now();
   const res1 = await findSongOrAdapt('sua sue kumoning');
   console.log({
@@ -19,11 +19,12 @@ async function main() {
     title: res1.title,
     artist: res1.artist,
     source: res1.source,
-    confidence: res1.confidence,
-    lyricsPreview: res1.lyricsText.split('\n')[0],
+    youtubeSong: res1.youtubeSongVideo?.url || null,
+    youtubeKaraoke: res1.youtubeKaraokeVideo?.url || null,
+    lyrics: res1.lyricsText,
   });
-  if (!res1.found || !res1.title.toLowerCase().includes('sua sue')) {
-    throw new Error('Gagal mengenal pasti lagu Sua Sue Kemoning!');
+  if (!res1.found || !res1.lyricsText.toLowerCase().includes('istimewa raja')) {
+    throw new Error('Lirik sebenar Sua Sue Kemuning tidak sepadan!');
   }
 
   const audio1 = await generateSingingAudio(res1);
@@ -39,7 +40,30 @@ async function main() {
     throw new Error('Output audio 1 bukan fail OGG Opus yang sah!');
   }
 
-  console.log('\n--- UJIAN 2: Mesej rawak (suai padan lirik + nyanyian ikut irama sebenar) ---');
+  console.log('\n--- UJIAN 2: Lagu luar pangkalan data ("kau ilhamku") ---');
+  const t2b = Date.now();
+  const resWeb = await findSongOrAdapt('kau ilhamku');
+  console.log({
+    found: resWeb.found,
+    title: resWeb.title,
+    artist: resWeb.artist,
+    source: resWeb.source,
+    youtubeSong: resWeb.youtubeSongVideo?.url || null,
+    lyricsPreview: resWeb.lyricsText.split('\n').slice(0, 2).join(' / '),
+  });
+  const audioWeb = await generateSingingAudio(resWeb);
+  console.log('Audio Web dijana:', {
+    bytes: audioWeb.buffer.length,
+    header: audioWeb.buffer.slice(0, 4).toString('ascii'),
+    actualMode: audioWeb.actualMode,
+    modelUsed: audioWeb.modelUsed,
+    elapsedMs: Date.now() - t2b,
+  });
+  if (audioWeb.buffer.slice(0, 4).toString('ascii') !== 'OggS') {
+    throw new Error('Output audio web bukan fail OGG Opus yang sah!');
+  }
+
+  console.log('\n--- UJIAN 3: Mesej rawak (suai padan lirik + nyanyian ikut irama sebenar) ---');
   const t2 = Date.now();
   const res2 = await findSongOrAdapt('Abang jangan lupa beli nasi lemak telur mata dua bungkus');
   console.log({

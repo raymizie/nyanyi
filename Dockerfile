@@ -1,8 +1,10 @@
 FROM node:20-slim
 
-# Install ffmpeg and ca-certificates for audio synthesis, pitch-shifting & HTTPS APIs
+# Install ffmpeg, python3, curl & yt-dlp for real YouTube melody extraction + audio synthesis
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg ca-certificates && \
+    apt-get install -y --no-install-recommends ffmpeg python3 curl ca-certificates && \
+    curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
+    chmod a+rx /usr/local/bin/yt-dlp && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -11,9 +13,6 @@ COPY package*.json ./
 RUN npm install --omit=dev
 
 COPY . .
-
-# Create runtime directories for ephemeral WhatsApp sessions and temp audio
-RUN mkdir -p /app/sessions /app/tmp
 
 ENV NODE_ENV=production
 ENV PORT=3000

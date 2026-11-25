@@ -5,14 +5,13 @@ const { execFile, spawnSync } = require('child_process');
 const { promisify } = require('util');
 const config = require('../config');
 const { synthesizeBackingTrack } = require('./melodySynth');
+const { fetchRealAudioFile } = require('./youtubeAudio');
+const { extractMelodyContour } = require('./pitchExtractor');
 
 const execFileAsync = promisify(execFile);
 
 let cachedFfmpegPath = null;
 
-/**
- * Dapatkan laluan binary ffmpeg (utamakan sistem Linux/Docker, fallback kepada ffmpeg-static).
- */
 function getFfmpegPath() {
   if (cachedFfmpegPath) return cachedFfmpegPath;
 
@@ -55,12 +54,9 @@ function safeUnlink(filePath) {
   }
 }
 
-/**
- * Senarai model TTS percuma (auto-tukar ke model seterusnya jika ada ralat / had kadar / perlahan).
- */
 const TTS_MODELS = [
   {
-    name: 'Model Vokal A (Google TTS tw-ob)',
+    name: 'Model Vokal A (Google TTS)',
     buildUrl: (text, lang) =>
       `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${encodeURIComponent(
         lang
@@ -72,7 +68,7 @@ const TTS_MODELS = [
     },
   },
   {
-    name: 'Model Vokal B (Google APIs gtx)',
+    name: 'Model Vokal B (Google APIs)',
     buildUrl: (text, lang) =>
       `https://translate.googleapis.com/translate_tts?ie=UTF-8&client=gtx&tl=${encodeURIComponent(
         lang
@@ -82,7 +78,7 @@ const TTS_MODELS = [
     },
   },
   {
-    name: 'Model Vokal C (Google Dict Fallback)',
+    name: 'Model Vokal C (Google Dict)',
     buildUrl: (text, lang) =>
       `https://translate.google.com/translate_tts?ie=UTF-8&client=dict-chrome-ex&tl=${encodeURIComponent(
         lang
@@ -92,7 +88,7 @@ const TTS_MODELS = [
     },
   },
   {
-    name: 'Model Vokal D (StreamElements TTS)',
+    name: 'Model Vokal D (StreamElements)',
     buildUrl: (text) =>
       `https://api.streamelements.com/kappa/v2/speech?voice=Brian&text=${encodeURIComponent(text)}`,
     headers: {
@@ -101,13 +97,8 @@ const TTS_MODELS = [
   },
 ];
 
-// Ingat model TTS mana yang paling lancar supaya permintaan seterusnya terus pantas
 let preferredTtsModelIndex = 0;
 
-/**
- * Muat turun satu model TTS dengan had masa keras (Promise.race) supaya tidak pernah tersangkut
- * walaupun DNS atau rangkaian perlahan.
- */
 async function trySingleTtsModel(model, idx, cleanText, lang, timeoutMs) {
   const controller = new AbortController();
   let timer;
@@ -138,11 +129,6 @@ async function trySingleTtsModel(model, idx, cleanText, lang, timeoutMs) {
   }
 }
 
-/**
- * Muat turun TTS dengan auto-fallback PANTAS:
- * 1. Cuba model utama yang paling stabil dahulu (had 2.2s)
- * 2. Jika gagal/lambat, lumba semua model alternatif SECARA SELARI (Promise.any, had 2.5s)
- */
 async function fetchTtsWithFallback(text, lang, outPath) {
   const cleanText = String(text || '').trim().slice(0, 180);
   if (!cleanText) return { ok: false, modelName: null };
@@ -159,7 +145,6 @@ async function fetchTtsWithFallback(text, lang, outPath) {
     fs.writeFileSync(outPath, primary.buf);
     return { ok: true, modelName: primary.modelName };
   } catch {
-    // Lumba model alternatif secara selari — siapa paling cepat berjaya terus menang!
     const fallbacks = TTS_MODELS.map((m, idx) => ({ m, idx })).filter(
       (x) => x.idx !== primaryIdx
     );
@@ -178,29 +163,12 @@ async function fetchTtsWithFallback(text, lang, outPath) {
 }
 
 /**
- * Muat turun klip audio sebenar (Deezer/iTunes preview) dan tukar pantas ke OGG Opus.
+ * Tukar fail audio asal (YouTube/Deezer/iTunes) terus kepada Voice Note OGG Opus (/nyanyi asal).
  */
-async function buildRealAudioClipOgg(previewUrl) {
+async function convertRawAudioToVoiceNote(rawPath) {
   ensureTmpDir();
-  const id = crypto.randomBytes(6).toString('hex');
-  const rawPath = path.join(config.TMP_DIR, `preview-${id}.audio`);
-  const outOgg = path.join(config.TMP_DIR, `clip-${id}.ogg`);
-
+  const outOgg = path.join(config.TMP_DIR, `orig-${crypto.randomBytes(5).toString('hex')}.ogg`);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
-    const res = await fetch(previewUrl, {
-      signal: controller.signal,
-      headers: { 'User-Agent': 'BotNyanyiWhatsApp/1.0' },
-    });
-    clearTimeout(timer);
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    const arrayBuf = await res.arrayBuffer();
-    if (arrayBuf.byteLength < 2048) throw new Error('Fail pratonton terlalu kecil');
-    fs.writeFileSync(rawPath, Buffer.from(arrayBuf));
-
     await runFfmpeg(
       [
         '-i', rawPath,
@@ -209,24 +177,151 @@ async function buildRealAudioClipOgg(previewUrl) {
         '-ac', '1',
         '-ar', '48000',
         '-c:a', 'libopus',
-        '-b:a', '48k',
-        '-application', 'voip',
+        '-b:a', '56k',
+        '-application', 'audio',
         outOgg,
       ],
       10000
     );
-
     return fs.readFileSync(outOgg);
   } finally {
-    safeUnlink(rawPath);
     safeUnlink(outOgg);
   }
 }
 
 /**
- * Bina audio melodi instrumental pantas (<1 saat) — digunakan sebagai mod pantas atau
- * fallback terakhir jika semua model TTS atas talian tidak dapat dihubungi.
+ * ENJIN TIRU IRAMA SEBENAR YOUTUBE:
+ * 1. Ambil audio sebenar daripada YouTube (utamakan Karaoke/Instrumental untuk iringan,
+ *    dan audio lagu asal untuk mengekstrak kontur pic F0 sebenar).
+ * 2. Ekstrak lengkuk pic F0 & masa mula nyanyian daripada audio sebenar.
+ * 3. Muat turun suara TTS lirik sebenar secara selari -> laras pic ikut kontur F0 YouTube ->
+ *    adun di atas irama sebenar YouTube dalam 1 arahan FFmpeg!
  */
+async function buildYouTubeImitatedSingingOgg(songResult) {
+  ensureTmpDir();
+  const id = crypto.randomBytes(5).toString('hex');
+  const tempFiles = [];
+  const outOgg = path.join(config.TMP_DIR, `yt-sing-${id}.ogg`);
+  tempFiles.push(outOgg);
+
+  try {
+    const ffmpegPath = getFfmpegPath();
+    const karaokeId = songResult.youtubeKaraokeVideo?.videoId || null;
+    const songId = songResult.youtubeSongVideo?.videoId || null;
+    const previewUrl = songResult.previewUrl || null;
+
+    // Muat turun audio rujukan (karaoke jika ada, atau lagu asal / preview)
+    const [karaokeAudio, refAudio] = await Promise.all([
+      karaokeId ? fetchRealAudioFile({ videoId: karaokeId }) : Promise.resolve(null),
+      fetchRealAudioFile({ videoId: songId, previewUrl }),
+    ]);
+
+    if (karaokeAudio?.path) tempFiles.push(karaokeAudio.path);
+    if (refAudio?.path) tempFiles.push(refAudio.path);
+
+    const backingPath = karaokeAudio?.path || refAudio?.path;
+    if (!backingPath) return null; // Biar jatuh balik ke enjin melodi tempatan
+
+    const phrases = (songResult.phrases || songResult.melodySong.phrases || []).slice(0, 4);
+    const lang = songResult.melodySong?.lang || 'ms';
+
+    // Ekstrak kontur pic F0 SEBENAR daripada audio lagu asal (atau karaoke)
+    const pitchSourcePath = refAudio?.path || karaokeAudio?.path;
+    const contour = await extractMelodyContour(pitchSourcePath, ffmpegPath, phrases.length);
+
+    // Muat turun TTS semua baris lirik SECARA SELARI
+    const ttsJobs = phrases.map(async (p, idx) => {
+      const mp3Path = path.join(config.TMP_DIR, `yttts-${id}-${idx}.mp3`);
+      tempFiles.push(mp3Path);
+      const res = await fetchTtsWithFallback(p.text, lang, mp3Path);
+      if (!res.ok) return null;
+
+      const seg = contour?.segments?.[idx];
+      const startSec = seg ? seg.startSec : 0.8 + idx * 3.8;
+      const relSemitones = seg ? seg.relSemitones : 0;
+      const pitchRatio = Math.pow(2, relSemitones / 12);
+
+      return {
+        path: mp3Path,
+        delayMs: Math.max(0, Math.round(startSec * 1000)),
+        pitchRatio,
+        modelName: res.modelName,
+      };
+    });
+
+    const resolvedVocals = (await Promise.all(ttsJobs)).filter(Boolean);
+    if (!resolvedVocals.length) {
+      // Jika TTS gagal, hantar audio sebenar YouTube/preview terus supaya pengguna tetap dengar irama sebenar!
+      const buf = await convertRawAudioToVoiceNote(backingPath);
+      return {
+        buffer: buf,
+        actualMode: 'real_audio_clip',
+        usedVocal: true,
+        modelUsed: karaokeAudio ? `Irama Karaoke ${karaokeAudio.source}` : `Audio Sebenar ${refAudio.source}`,
+      };
+    }
+
+    // Jika iringan ialah Karaoke YouTube sebenar -> kekalkan penuh jernih (volume=0.58)
+    // Jika iringan ialah lagu asal YouTube (tiada karaoke) -> lembutkan frekuensi vokal asal
+    // dengan penapis lembut (eq mid-dip) supaya irama/instrumen asal jelas dan nyanyian bot kedengaran di hadapan!
+    const backingFilter = karaokeAudio
+      ? '[0:a]atrim=0:24,asetpts=PTS-STARTPTS,volume=0.58[bg]'
+      : '[0:a]atrim=0:24,asetpts=PTS-STARTPTS,equalizer=f=1200:t=q:w=1.2:g=-6,equalizer=f=2600:t=q:w=1.2:g=-5,volume=0.45[bg]';
+
+    const inputs = ['-i', backingPath];
+    const filterParts = [backingFilter];
+    const mixLabels = ['[bg]'];
+
+    resolvedVocals.forEach((voc, idx) => {
+      inputs.push('-i', voc.path);
+      const inIdx = idx + 1;
+      const targetRate = Math.round(44100 * voc.pitchRatio);
+      const compTempo = Math.max(0.75, Math.min(1.35, 1 / voc.pitchRatio));
+      filterParts.push(
+        `[${inIdx}:a]aresample=44100,asetrate=${targetRate},aresample=44100,` +
+          `atempo=${compTempo.toFixed(3)},highpass=f=140,lowpass=f=4800,` +
+          `aecho=0.8:0.85:35:0.2,adelay=${voc.delayMs}|${voc.delayMs},volume=1.65[v${idx}]`
+      );
+      mixLabels.push(`[v${idx}]`);
+    });
+
+    filterParts.push(
+      `${mixLabels.join('')}amix=inputs=${mixLabels.length}:duration=first:dropout_transition=0:normalize=0,afade=t=out:st=22:d=1.8,alimiter=limit=0.95[out]`
+    );
+
+    await runFfmpeg(
+      [
+        ...inputs,
+        '-filter_complex', filterParts.join(';'),
+        '-map', '[out]',
+        '-t', '24',
+        '-ac', '1',
+        '-ar', '48000',
+        '-c:a', 'libopus',
+        '-b:a', '56k',
+        '-application', 'audio',
+        outOgg,
+      ],
+      15000
+    );
+
+    const backingLabel = karaokeAudio
+      ? `Karaoke ${karaokeAudio.source}`
+      : `Irama ${refAudio.source}`;
+
+    return {
+      buffer: fs.readFileSync(outOgg),
+      actualMode: 'youtube_imitate_sing',
+      usedVocal: true,
+      modelUsed: `${resolvedVocals[0].modelName} + Tiru Pic F0 (${backingLabel})`,
+    };
+  } catch {
+    return null;
+  } finally {
+    for (const f of tempFiles) safeUnlink(f);
+  }
+}
+
 async function buildFastInstrumentalOgg(songResult) {
   ensureTmpDir();
   const id = crypto.randomBytes(6).toString('hex');
@@ -262,12 +357,6 @@ async function buildFastInstrumentalOgg(songResult) {
   }
 }
 
-/**
- * Sintesis nyanyian bot PANTAS (satu laluan FFmpeg sahaja + muat turun TTS selari):
- * 1. Jana trek iringan melodi sebenar (WAV tempatan, <50ms)
- * 2. Muat turun semua frasa TTS SECARA SELARI dengan auto-fallback 4 model TTS
- * 3. Gabungkan pelarasan pic + adelay + adunan muzik + enkoding OGG Opus dalam 1 arahan FFmpeg!
- */
 async function buildBotSingingOgg(songResult) {
   ensureTmpDir();
   const id = crypto.randomBytes(6).toString('hex');
@@ -282,11 +371,9 @@ async function buildBotSingingOgg(songResult) {
     const phrases = songResult.phrases || melodySong.phrases;
     const lang = melodySong.lang || 'ms';
 
-    // 1. Bina trek iringan melodi sebenar
     const backing = synthesizeBackingTrack(melodySong, phrases, backingWav);
+    const baseMidi = 65;
 
-    // 2. Muat turun suara TTS untuk semua frasa SECARA SELARI (jimat 4x masa!)
-    const baseMidi = 65; // F4
     const ttsJobs = backing.phrases.map(async (pm, idx) => {
       const mp3Path = path.join(config.TMP_DIR, `tts-${id}-${idx}.mp3`);
       tempFiles.push(mp3Path);
@@ -299,7 +386,6 @@ async function buildBotSingingOgg(songResult) {
         ? validNotes.reduce((acc, n) => acc + n.midi, 0) / validNotes.length
         : baseMidi;
 
-      // Pelarasan pic halus mengikut melodi frasa supaya kedengaran menyanyi & tetap jelas
       const semitoneDelta = Math.max(-3.5, Math.min(4.5, (avgMidi - baseMidi) * 0.7));
       const pitchRatio = Math.pow(2, semitoneDelta / 12);
 
@@ -313,7 +399,6 @@ async function buildBotSingingOgg(songResult) {
 
     const resolvedVocals = (await Promise.all(ttsJobs)).filter(Boolean);
 
-    // 3. SATU panggilan FFmpeg sahaja untuk pitch-shift semua frasa + campur muzik -> OGG Opus
     if (resolvedVocals.length > 0) {
       const inputs = ['-i', backingWav];
       const filterParts = ['[0:a]volume=0.46[bg]'];
@@ -323,7 +408,6 @@ async function buildBotSingingOgg(songResult) {
         inputs.push('-i', voc.path);
         const inIdx = idx + 1;
         const targetRate = Math.round(44100 * voc.pitchRatio);
-        // Imbangi perubahan kelajuan daripada asetrate dengan atempo songsang (clamped 0.72..1.38)
         const compensateTempo = Math.max(0.72, Math.min(1.38, 1 / voc.pitchRatio));
         filterParts.push(
           `[${inIdx}:a]aresample=44100,asetrate=${targetRate},aresample=44100,` +
@@ -359,11 +443,10 @@ async function buildBotSingingOgg(songResult) {
           modelUsed: resolvedVocals[0].modelName,
         };
       } catch {
-        // Jika adunan kompleks gagal/timeout pada CPU rendah, fallback terus ke instrumental pantas
+        // fallback instrumental
       }
     }
 
-    // Fallback akhir: instrumental melodi sebenar (pasti berjaya & pantas)
     await runFfmpeg(
       [
         '-i', backingWav,
@@ -387,10 +470,13 @@ async function buildBotSingingOgg(songResult) {
 }
 
 /**
- * Titik masuk utama penjana audio nyanyian hibrid dengan auto-fallback berbilang model.
+ * Titik masuk utama penjana audio nyanyian:
+ * 1. Mod pantas (/nyanyi cepat) -> Instrumental tempatan (<0.5s)
+ * 2. Mod klip asal (/nyanyi asal) -> Audio YouTube / Deezer / iTunes asal
+ * 3. Mod lalai (/nyanyi) bila lagu sebenar ditemui -> Ambil irama YouTube + ekstrak pic F0 + bot nyanyi tiru irama!
+ * 4. Fallback automatik -> Sintesis melodi & vokal tempatan (auto-tukar 4 model TTS -> Instrumental)
  */
 async function generateSingingAudio(songResult, options = {}) {
-  // Mod pantas eksplisit (/nyanyi cepat atau /nyanyi melodi)
   if (options.fastMode) {
     const fast = await buildFastInstrumentalOgg(songResult);
     return {
@@ -401,22 +487,38 @@ async function generateSingingAudio(songResult, options = {}) {
     };
   }
 
-  // Model 1: Klip audio lagu sebenar (Deezer / iTunes)
-  if (songResult.mode === 'real_audio_clip' && songResult.previewUrl) {
-    try {
-      const buffer = await buildRealAudioClipOgg(songResult.previewUrl);
-      return {
-        buffer,
-        actualMode: 'real_audio_clip',
-        usedVocal: true,
-        modelUsed: 'Klip Audio Sebenar (Deezer/iTunes)',
-      };
-    } catch {
-      // Auto-tukar ke model nyanyian bot jika klip gagal/lambat
+  // Mod audio asal terus daripada YouTube / Deezer / iTunes (/nyanyi asal)
+  if (options.originalClip || songResult.mode === 'real_audio_clip') {
+    const raw = await fetchRealAudioFile({
+      videoId: songResult.youtubeSongVideo?.videoId,
+      previewUrl: songResult.previewUrl,
+    });
+    if (raw?.path) {
+      try {
+        const buffer = await convertRawAudioToVoiceNote(raw.path);
+        return {
+          buffer,
+          actualMode: 'real_audio_clip',
+          usedVocal: true,
+          modelUsed: `Audio Lagu Sebenar (${raw.source})`,
+        };
+      } finally {
+        safeUnlink(raw.path);
+      }
     }
   }
 
-  // Model 2-4: Nyanyian suara bot (auto-fallback TTS Model A -> B -> C -> D -> Instrumental Pantas)
+  // Mod utama apabila lagu sebenar ditemui: ambil irama sebenar YouTube, ekstrak pic F0, & nyanyi tiru irama!
+  if (
+    songResult.found &&
+    !options.forceLocalSynth &&
+    (songResult.youtubeKaraokeVideo || songResult.youtubeSongVideo || songResult.previewUrl)
+  ) {
+    const ytImitated = await buildYouTubeImitatedSingingOgg(songResult);
+    if (ytImitated) return ytImitated;
+  }
+
+  // Fallback / Lirik suai padan: sintesis melodi sebenar + vokal TTS multi-model
   const synth = await buildBotSingingOgg(songResult);
   return {
     buffer: synth.buffer,
@@ -428,8 +530,8 @@ async function generateSingingAudio(songResult, options = {}) {
 
 module.exports = {
   generateSingingAudio,
+  buildYouTubeImitatedSingingOgg,
   buildBotSingingOgg,
-  buildRealAudioClipOgg,
   buildFastInstrumentalOgg,
   getFfmpegPath,
 };

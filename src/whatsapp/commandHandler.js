@@ -45,9 +45,6 @@ function formatRemainingTime(ms) {
   return `${mins} minit ${secs} saat`;
 }
 
-/**
- * Kendali arahan WhatsApp untuk satu sesi slot.
- */
 async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
   const remoteJid = msg.key?.remoteJid;
   if (!remoteJid || remoteJid === 'status@broadcast') return;
@@ -87,13 +84,13 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
       remoteJid,
       {
         text:
-          `🎼 *Senarai Irama Sebenar Terbina Dalam:*\n\n${list}\n\n` +
+          `🎼 *Senarai Irama Terbina Dalam (Selain Carian Web & YouTube):*\n\n${list}\n\n` +
           `💡 *Cara guna:*\n` +
-          `• Taip \`/nyanyi sua sue kumoning\`\n` +
+          `• \`/nyanyi sua sue kumoning\` — cari lirik sebenar + tiru irama YouTube\n` +
+          `• \`/nyanyi asal sua sue kumoning\` — mainkan klip lagu asal dari YouTube\n` +
           `• Reply mana-mana mesej dengan \`/nyanyi\`\n` +
-          `• Paksa suara bot: \`/nyanyi suara <teks>\`\n` +
-          `• Mod pantas (<1s): \`/nyanyi cepat <teks>\`\n` +
-          `• Pilih irama khas: \`/nyanyi irama:rasa-sayang <teks>\``,
+          `• \`/nyanyi cepat <teks>\` — mod pantas (<1s)\n` +
+          `• \`/nyanyi irama:rasa-sayang <teks>\` — pilih irama khas`,
       },
       { quoted: msg }
     );
@@ -106,9 +103,9 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
       {
         text:
           `🎤 *Panduan Bot Nyanyi WhatsApp*\n\n` +
-          `1️⃣ *Reply mesej/lirik* dengan \`/nyanyi\` — bot cari lagu sebenar; jika tiada, bot sesuaikan lirik & nyanyi ikut irama sebenar!\n` +
-          `2️⃣ \`/nyanyi sua sue kumoning\` — cari & nyanyikan terus.\n` +
-          `3️⃣ \`/nyanyi suara <teks>\` — paksa suara bot (auto-tukar model jika sibuk).\n` +
+          `1️⃣ *Reply mesej/lirik* dengan \`/nyanyi\` — bot cari lirik di web & irama di YouTube, lalu nyanyi ikut irama sebenar!\n` +
+          `2️⃣ \`/nyanyi sua sue kumoning\` — cari lagu, lirik & tiru irama YouTube.\n` +
+          `3️⃣ \`/nyanyi asal <tajuk/lirik>\` — hantar klip audio asal YouTube/lagu sebenar.\n` +
           `4️⃣ \`/nyanyi cepat <teks>\` — mod instrumental pantas (<1 saat).\n` +
           `5️⃣ \`/nyanyi irama:<id> <teks>\` — pilih irama sendiri.\n` +
           `6️⃣ \`/lagu\` — senarai irama | \`/masa\` — baki sesi.`,
@@ -121,17 +118,20 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
   const argText = rawText.replace(/^(\/nyanyi|!nyanyi|\/sing|!sing)\s*/i, '').trim();
   const quotedText = extractQuotedText(msg.message);
 
-  let forceBotVoice = false;
+  let originalClip = false;
+  let forceLocalSynth = false;
   let fastMode = false;
   let preferredMelody = null;
   let query = argText;
 
-  if (/^(cepat|pantas|melodi)\b/i.test(query)) {
+  if (/^(asal|ori|original|youtube|yt)\b/i.test(query)) {
+    originalClip = true;
+    query = query.replace(/^(asal|ori|original|youtube|yt)\s*/i, '').trim();
+  } else if (/^(cepat|pantas|melodi)\b/i.test(query)) {
     fastMode = true;
-    forceBotVoice = true;
+    forceLocalSynth = true;
     query = query.replace(/^(cepat|pantas|melodi)\s*/i, '').trim();
   } else if (/^suara\b/i.test(query)) {
-    forceBotVoice = true;
     query = query.replace(/^suara\s*/i, '').trim();
   }
 
@@ -139,7 +139,7 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
   if (iramaMatch) {
     preferredMelody = iramaMatch[1].replace(/[-_]/g, ' ');
     query = (iramaMatch[2] || '').trim();
-    forceBotVoice = true;
+    forceLocalSynth = true;
   }
 
   if (!query && quotedText) {
@@ -162,22 +162,24 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
   try {
     await sock.sendPresenceUpdate('recording', remoteJid).catch(() => {});
 
-    // 1. Cari lagu / sesuaikan lirik dahulu (pantas <= 3s)
     const songResult = await findSongOrAdapt(query, {
-      forceBotVoice,
+      originalClip,
       preferredMelody,
     });
 
-    // 2. Hantar maklumat lagu SERTA-MERTA supaya pengguna tidak menunggu lama
+    const ytLink =
+      songResult.youtubeKaraokeVideo?.url || songResult.youtubeSongVideo?.url || null;
+
     let infoText = '';
     if (songResult.found) {
       infoText =
         `🎵 *Lagu Dijumpai!*\n` +
         `• *Tajuk:* ${songResult.title}\n` +
         `• *Artis:* ${songResult.artist}\n` +
-        `• *Sumber:* ${songResult.source}\n\n` +
-        `📜 *Lirik:*\n_${songResult.lyricsText}_\n\n` +
-        `🎙️ _Menyiapkan nyanyian..._`;
+        `• *Sumber:* ${songResult.source}\n` +
+        (ytLink ? `• *Rujukan YouTube:* ${ytLink}\n` : '') +
+        `\n📜 *Lirik Sebenar:*\n_${songResult.lyricsText}_\n\n` +
+        `🎙️ _Meniru irama & menyiapkan nyanyian..._`;
     } else {
       infoText =
         `🎶 *Lagu tidak dijumpai — Lirik disesuaikan mengikut irama sebenar!*\n` +
@@ -188,8 +190,11 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
 
     await sendTracked(remoteJid, { text: infoText }, { quoted: msg });
 
-    // 3. Jana audio nyanyian dengan auto-fallback berbilang model
-    const audio = await generateSingingAudio(songResult, { fastMode });
+    const audio = await generateSingingAudio(songResult, {
+      fastMode,
+      originalClip,
+      forceLocalSynth,
+    });
 
     await sendTracked(
       remoteJid,
