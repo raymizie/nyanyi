@@ -79,18 +79,17 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
   }
 
   if (isLagu) {
-    const list = SONGS_DB.map((s, idx) => `${idx + 1}. *${s.title}* (\`${s.id}\`)`).join('\n');
+    const list = SONGS_DB.map((s, idx) => `${idx + 1}. *${s.title}*`).join('\n');
     await sendTracked(
       remoteJid,
       {
         text:
-          `🎼 *Senarai Irama Terbina Dalam (Selain Carian Web & YouTube):*\n\n${list}\n\n` +
+          `🎼 *Bot menyokong SEMUA lagu di YouTube, Deezer, iTunes, LRCLIB & Genius!*\n\n` +
+          `Koleksi klasik terkenal:\n${list}\n\n` +
           `💡 *Cara guna:*\n` +
-          `• \`/nyanyi sua sue kumoning\` — cari lirik sebenar + tiru irama YouTube\n` +
-          `• \`/nyanyi asal sua sue kumoning\` — mainkan klip lagu asal dari YouTube\n` +
-          `• Reply mana-mana mesej dengan \`/nyanyi\`\n` +
-          `• \`/nyanyi cepat <teks>\` — mod pantas (<1s)\n` +
-          `• \`/nyanyi irama:rasa-sayang <teks>\` — pilih irama khas`,
+          `• \`/nyanyi sua sue kumoning\` — cari lagu & mainkan *audio lagu sebenar* berkualiti studio\n` +
+          `• Reply mana-mana mesej dengan \`/nyanyi\` — jika lagu wujud, mainkan lagu sebenar; jika tiada, **AI Studio (ACE-Step / DiffRhythm)** akan mencipta & menyanyikan lagu baharu untuk teks itu!\n` +
+          `• \`/nyanyi ai <teks/lirik>\` — paksa AI Studio menyanyikan lagu baharu dengan suara & band penuh`,
       },
       { quoted: msg }
     );
@@ -103,12 +102,10 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
       {
         text:
           `🎤 *Panduan Bot Nyanyi WhatsApp*\n\n` +
-          `1️⃣ *Reply mesej/lirik* dengan \`/nyanyi\` — bot cari lirik di web & irama di YouTube, lalu nyanyi ikut irama sebenar!\n` +
-          `2️⃣ \`/nyanyi sua sue kumoning\` — cari lagu, lirik & tiru irama YouTube.\n` +
-          `3️⃣ \`/nyanyi asal <tajuk/lirik>\` — hantar klip audio asal YouTube/lagu sebenar.\n` +
-          `4️⃣ \`/nyanyi cepat <teks>\` — mod instrumental pantas (<1 saat).\n` +
-          `5️⃣ \`/nyanyi irama:<id> <teks>\` — pilih irama sendiri.\n` +
-          `6️⃣ \`/lagu\` — senarai irama | \`/masa\` — baki sesi.`,
+          `1️⃣ *Reply mesej/lirik* dengan \`/nyanyi\` — jika lagu sebenar wujud, bot hantar *lagu sebenar* (YouTube/Studio). Jika tiada, *AI Studio (ACE-Step / DiffRhythm)* cipta & nyanyikan lagu sebenar daripada mesej itu!\n` +
+          `2️⃣ \`/nyanyi sua sue kumoning\` — cari lagu & hantar audio sebenar.\n` +
+          `3️⃣ \`/nyanyi ai <lirik/teks>\` — cipta nyanyian AI penuh (suara & instrumen studio).\n` +
+          `4️⃣ \`/lagu\` — info lagu | \`/masa\` — baki sesi aktif.`,
       },
       { quoted: msg }
     );
@@ -118,28 +115,14 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
   const argText = rawText.replace(/^(\/nyanyi|!nyanyi|\/sing|!sing)\s*/i, '').trim();
   const quotedText = extractQuotedText(msg.message);
 
-  let originalClip = false;
-  let forceLocalSynth = false;
-  let fastMode = false;
-  let preferredMelody = null;
+  let forceAiSing = false;
   let query = argText;
 
-  if (/^(asal|ori|original|youtube|yt)\b/i.test(query)) {
-    originalClip = true;
+  if (/^(ai|cipta|cover|baru|baharu)\b/i.test(query)) {
+    forceAiSing = true;
+    query = query.replace(/^(ai|cipta|cover|baru|baharu)\s*/i, '').trim();
+  } else if (/^(asal|ori|original|youtube|yt)\b/i.test(query)) {
     query = query.replace(/^(asal|ori|original|youtube|yt)\s*/i, '').trim();
-  } else if (/^(cepat|pantas|melodi)\b/i.test(query)) {
-    fastMode = true;
-    forceLocalSynth = true;
-    query = query.replace(/^(cepat|pantas|melodi)\s*/i, '').trim();
-  } else if (/^suara\b/i.test(query)) {
-    query = query.replace(/^suara\s*/i, '').trim();
-  }
-
-  const iramaMatch = query.match(/^irama:([^\s]+)\s*(.*)$/i);
-  if (iramaMatch) {
-    preferredMelody = iramaMatch[1].replace(/[-_]/g, ' ');
-    query = (iramaMatch[2] || '').trim();
-    forceLocalSynth = true;
   }
 
   if (!query && quotedText) {
@@ -163,38 +146,33 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
     await sock.sendPresenceUpdate('recording', remoteJid).catch(() => {});
 
     const songResult = await findSongOrAdapt(query, {
-      originalClip,
-      preferredMelody,
+      originalClip: !forceAiSing,
     });
 
-    const ytLink =
-      songResult.youtubeKaraokeVideo?.url || songResult.youtubeSongVideo?.url || null;
+    const ytLink = songResult.youtubeSongVideo?.url || null;
 
     let infoText = '';
-    if (songResult.found) {
+    if (songResult.found && !forceAiSing) {
       infoText =
-        `🎵 *Lagu Dijumpai!*\n` +
+        `🎵 *Lagu Sebenar Dijumpai!*\n` +
         `• *Tajuk:* ${songResult.title}\n` +
         `• *Artis:* ${songResult.artist}\n` +
         `• *Sumber:* ${songResult.source}\n` +
-        (ytLink ? `• *Rujukan YouTube:* ${ytLink}\n` : '') +
-        `\n📜 *Lirik Sebenar:*\n_${songResult.lyricsText}_\n\n` +
-        `🎙️ _Meniru irama & menyiapkan nyanyian..._`;
+        (ytLink ? `• *YouTube:* ${ytLink}\n` : '') +
+        `\n📜 *Lirik:*\n_${songResult.lyricsText}_\n\n` +
+        `🎧 _Memuat turun audio lagu sebenar..._`;
     } else {
       infoText =
-        `🎶 *Lagu tidak dijumpai — Lirik disesuaikan mengikut irama sebenar!*\n` +
-        `• *Irama Dipilih:* ${songResult.melodySong.title}\n\n` +
-        `📜 *Lirik Suai Padan:*\n_${songResult.lyricsText}_\n\n` +
-        `🎙️ _Menyiapkan nyanyian..._`;
+        `✨ *Mencipta Lagu & Nyanyian AI Studio Sebenar...*\n` +
+        `• *Enjin AI:* ACE-Step / DiffRhythm (Vokal & Band Penuh)\n` +
+        (songResult.found ? `• *Rujukan Lagu:* ${songResult.title}\n` : '') +
+        `\n📜 *Lirik:*\n_${songResult.lyricsText}_\n\n` +
+        `🎙️ _Menjana nyanyian studio (±15–30 saat)..._`;
     }
 
     await sendTracked(remoteJid, { text: infoText }, { quoted: msg });
 
-    const audio = await generateSingingAudio(songResult, {
-      fastMode,
-      originalClip,
-      forceLocalSynth,
-    });
+    const audio = await generateSingingAudio(songResult, { forceAiSing });
 
     await sendTracked(
       remoteJid,
@@ -211,7 +189,7 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
     await sendTracked(
       remoteJid,
       {
-        text: `⚠️ Maaf, gagal menjana nyanyian buat masa ini (${err.message || 'ralat audio'}). Sila cuba \`/nyanyi cepat ${query}\`.`,
+        text: `⚠️ Maaf, gagal menyediakan lagu buat masa ini (${err.message || 'ralat audio'}). Sila cuba lagi sebentar.`,
       },
       { quoted: msg }
     );
