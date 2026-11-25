@@ -16,6 +16,45 @@ const { handleIncomingMessage } = require('./commandHandler');
 
 const silentLogger = pino({ level: 'silent' });
 
+/**
+ * Cache memori ringan dengan TTL — serasi dengan antara muka CacheStore Baileys
+ * (`msgRetryCounterCache`) serta penyimpanan mesej untuk `getMessage` bagi mengelakkan
+ * ralat WhatsApp "Waiting for this message. This may take a while."
+ */
+class SimpleTtlCache {
+  constructor(maxItems = 500, ttlMs = 15 * 60 * 1000) {
+    this.maxItems = maxItems;
+    this.ttlMs = ttlMs;
+    this.map = new Map();
+  }
+
+  get(key) {
+    const entry = this.map.get(key);
+    if (!entry) return undefined;
+    if (Date.now() > entry.expiresAt) {
+      this.map.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+
+  set(key, value) {
+    if (this.map.size >= this.maxItems) {
+      const oldestKey = this.map.keys().next().value;
+      if (oldestKey !== undefined) this.map.delete(oldestKey);
+    }
+    this.map.set(key, { value, expiresAt: Date.now() + this.ttlMs });
+  }
+
+  del(key) {
+    this.map.delete(key);
+  }
+
+  flushAll() {
+    this.map.clear();
+  }
+}
+
 function maskPhone(jidOrNumber) {
   const digits = String(jidOrNumber || '').split('@')[0].split(':')[0].replace(/\D/g, '');
   if (!digits) return 'Peranti WhatsApp';
@@ -52,6 +91,8 @@ class SessionManager extends EventEmitter {
       retryTimer: null,
       songsSung: 0,
       generation: 0,
+      messageCache: new SimpleTtlCache(400, 20 * 60 * 1000),
+      retryCache: new SimpleTtlCache(500, 10 * 60 * 1000),
     };
   }
 
@@ -68,7 +109,6 @@ class SessionManager extends EventEmitter {
   }
 
   async init() {
-    // Bersihkan sesi lama sewaktu pelayan bermula (Render ephemeral filesystem)
     try {
       fs.rmSync(config.SESSIONS_DIR, { recursive: true, force: true });
     } catch {
@@ -81,7 +121,7 @@ class SessionManager extends EventEmitter {
       const { version } = await fetchLatestBaileysVersion();
       this.baileysVersion = version;
     } catch {
-      this.baileysVersion = [2, 3000, 1015901307];
+      this.baileysVersion = [2, 3000, 1020608496];
     }
 
     await this.ensureQrSlot();
@@ -129,9 +169,6 @@ class SessionManager extends EventEmitter {
     };
   }
 
-  /**
-   * Pastikan sentiasa ada 1 slot menunggu QR jika masih ada slot kosong.
-   */
   async ensureQrSlot() {
     const existingPending = this.slots.find(
       (s) => s.status === 'qr' || s.status === 'connecting'
@@ -168,6 +205,8 @@ class SessionManager extends EventEmitter {
 
     if (cleanAuth) {
       this._cleanAuthDir(slotId);
+      slot.messageCache.flushAll();
+      slot.retryCache.flushAll();
     }
 
     const authDir = this._slotAuthDir(slotId);
@@ -189,14 +228,25 @@ class SessionManager extends EventEmitter {
     }
 
     const sock = makeWASocket({
-      version: this.baileysVersion || [2, 3000, 1015901307],
+      version: this.baileysVersion || [2, 3000, 1020608496],
       auth: state,
       logger: silentLogger,
       printQRInTerminal: false,
-      browser: Browsers.ubuntu('Bot Nyanyi WhatsApp'),
+      browser: Browsers.macOS('Desktop'),
       markOnlineOnConnect: false,
       syncFullHistory: false,
       generateHighQualityLinkPreview: false,
+      defaultQueryTimeoutMs: 20000,
+      retryRequestDelayMs: 250,
+      maxMsgRetryCount: 5,
+      msgRetryCounterCache: slot.retryCache,
+      // Kritikal: membolehkan Baileys menyulit semula mesej serta-merta jika penerima
+      // menunjukkan "Waiting for this message. This may take a while."
+      getMessage: async (key) => {
+        if (!key?.id) return undefined;
+        const cached = slot.messageCache.get(key.id);
+        return cached || undefined;
+      },
     });
 
     slot.sock = sock;
@@ -242,7 +292,7 @@ class SessionManager extends EventEmitter {
         this._scheduleExpiry(slot, myGen);
         this.emitUpdate();
 
-        // Terus jana QR baharu untuk pengguna seterusnya
+        // Jana QR baharu untuk pengguna seterusnya
         this.ensureQrSlot().catch(() => {});
       }
 
@@ -250,17 +300,15 @@ class SessionManager extends EventEmitter {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const wasConnected = slot.status === 'connected';
 
-        // Kod 515 (restartRequired) biasa berlaku sejurus imbas QR — sambung semula menggunakan auth sedia ada
         if (statusCode === DisconnectReason.restartRequired) {
           slot.retryTimer = setTimeout(() => {
             if (slot.generation === myGen) {
               this._startSlot(slot.id, { cleanAuth: false }).catch(() => {});
             }
-          }, 1200);
+          }, 1000);
           return;
         }
 
-        // Jika masih menunggu QR dan tamat masa QR (408/515/428), jana semula QR perlahan-lahan
         if (!wasConnected && statusCode !== DisconnectReason.loggedOut) {
           slot.retryTimer = setTimeout(() => {
             if (slot.generation === myGen) {
@@ -270,7 +318,16 @@ class SessionManager extends EventEmitter {
           return;
         }
 
-        // Jika terputus / log keluar dari telefon -> kosongkan slot
+        // Sambung semula secara senyap jika terputus sementara (bukan loggedOut)
+        if (wasConnected && statusCode !== DisconnectReason.loggedOut && Date.now() < (slot.expiresAt || 0)) {
+          slot.retryTimer = setTimeout(() => {
+            if (slot.generation === myGen) {
+              this._startSlot(slot.id, { cleanAuth: false }).catch(() => {});
+            }
+          }, 2000);
+          return;
+        }
+
         this._resetSlotToEmpty(slot);
         this.ensureQrSlot().catch(() => {});
       }
@@ -282,6 +339,10 @@ class SessionManager extends EventEmitter {
       if (id) {
         this.sentMessageIds.add(id);
         setTimeout(() => this.sentMessageIds.delete(id), 120000);
+        // Simpan mesej dalam cache supaya retry decryption WhatsApp selesai serta-merta
+        if (sent.message) {
+          slot.messageCache.set(id, sent.message);
+        }
       }
       return sent;
     };
@@ -292,7 +353,10 @@ class SessionManager extends EventEmitter {
 
       for (const msg of messages) {
         if (!msg?.message) continue;
-        if (msg.key?.id && this.sentMessageIds.has(msg.key.id)) continue;
+        if (msg.key?.id) {
+          slot.messageCache.set(msg.key.id, msg.message);
+          if (this.sentMessageIds.has(msg.key.id)) continue;
+        }
 
         handleIncomingMessage({ sock, slot, msg, sendTracked })
           .then(() => this.emitUpdate())
@@ -337,9 +401,6 @@ class SessionManager extends EventEmitter {
     this.emitUpdate();
   }
 
-  /**
-   * Jana semula kod QR pada slot menunggu semasa (butang "Jana Semula Kod QR").
-   */
   async regenerateQr() {
     const pending = this.slots.find((s) => s.status === 'qr' || s.status === 'connecting');
     if (pending) {
@@ -351,9 +412,6 @@ class SessionManager extends EventEmitter {
     return slot ? slot.id : null;
   }
 
-  /**
-   * Log keluar & kosongkan satu slot aktif.
-   */
   async disconnectSlot(slotId, reason = '') {
     const slot = this.slots.find((s) => s.id === Number(slotId));
     if (!slot || slot.status === 'empty') return false;

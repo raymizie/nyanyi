@@ -126,21 +126,28 @@ function searchLocalSongs(query) {
   return null;
 }
 
-async function fetchJson(url, timeoutMs = config.HTTP_TIMEOUT_MS) {
+async function fetchJson(url, timeoutMs = 2500) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timer;
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(null);
+    }, timeoutMs);
+  });
+
+  const fetchPromise = fetch(url, {
+    signal: controller.signal,
+    headers: {
+      'User-Agent': 'BotNyanyiWhatsApp/1.0 (https://github.com)',
+      Accept: 'application/json',
+    },
+  })
+    .then((res) => (res.ok ? res.json() : null))
+    .catch(() => null);
+
   try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'BotNyanyiWhatsApp/1.0 (https://github.com)',
-        Accept: 'application/json',
-      },
-    });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch {
-    return null;
+    return await Promise.race([fetchPromise, timeoutPromise]);
   } finally {
     clearTimeout(timer);
   }
@@ -148,7 +155,7 @@ async function fetchJson(url, timeoutMs = config.HTTP_TIMEOUT_MS) {
 
 async function searchLrclib(query) {
   const url = `https://lrclib.net/api/search?q=${encodeURIComponent(query)}`;
-  const data = await fetchJson(url, 6000);
+  const data = await fetchJson(url, 2800);
   if (!Array.isArray(data) || !data.length) return null;
 
   let best = null;
@@ -177,7 +184,7 @@ async function searchLrclib(query) {
 
 async function searchDeezer(query) {
   const url = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=5`;
-  const data = await fetchJson(url, 6000);
+  const data = await fetchJson(url, 2500);
   if (!data || !Array.isArray(data.data) || !data.data.length) return null;
 
   let best = null;
@@ -209,7 +216,7 @@ async function searchItunes(query) {
   const url = `https://itunes.apple.com/search?term=${encodeURIComponent(
     query
   )}&media=music&entity=song&limit=5`;
-  const data = await fetchJson(url, 6000);
+  const data = await fetchJson(url, 2500);
   if (!data || !Array.isArray(data.results) || !data.results.length) return null;
 
   let best = null;
