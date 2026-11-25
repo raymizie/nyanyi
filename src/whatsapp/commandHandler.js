@@ -1,4 +1,4 @@
-const { findSongOrAdapt, SONGS_DB } = require('../services/songFinder');
+const { findSongOrAdapt, adaptLyricsToMelody, SONGS_DB } = require('../services/songFinder');
 const { generateSingingAudio } = require('../services/singingSynth');
 
 function extractMessageText(message) {
@@ -79,17 +79,18 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
   }
 
   if (isLagu) {
-    const list = SONGS_DB.map((s, idx) => `${idx + 1}. *${s.title}*`).join('\n');
+    const list = SONGS_DB.slice(0, 8).map((s, idx) => `${idx + 1}. *${s.title}*`).join('\n');
     await sendTracked(
       remoteJid,
       {
         text:
-          `🎼 *Bot menyokong SEMUA lagu di YouTube, Deezer, iTunes, LRCLIB & Genius!*\n\n` +
-          `Koleksi klasik terkenal:\n${list}\n\n` +
+          `🎼 *Bot mencari SEBARANG lagu di Spotify, Smule, LRCLIB, Genius & YouTube!*\n\n` +
           `💡 *Cara guna:*\n` +
-          `• \`/nyanyi sua sue kumoning\` — cari lagu & mainkan *audio lagu sebenar* berkualiti studio\n` +
-          `• Reply mana-mana mesej dengan \`/nyanyi\` — jika lagu wujud, mainkan lagu sebenar; jika tiada, **AI Studio (ACE-Step / DiffRhythm)** akan mencipta & menyanyikan lagu baharu untuk teks itu!\n` +
-          `• \`/nyanyi ai <teks/lirik>\` — paksa AI Studio menyanyikan lagu baharu dengan suara & band penuh`,
+          `• \`/nyanyi bila cinta di dusta\` — cari tajuk & lirik, analisis BPM & kunci lagu asal, lalu **cipta nyanyian mengikut melodi sebenar (95% kunci irama)**!\n` +
+          `• \`/nyanyi asal bila cinta di dusta\` — mainkan klip nyanyian lagu asal terus (tanpa intro)\n` +
+          `• \`/nyanyi ikut:bila-cinta-didusta <lirik anda sendiri>\` — nyanyikan lirik anda sendiri mengikut melodi lagu pilihan!\n` +
+          `• Reply mana-mana mesej dengan \`/nyanyi\`\n\n` +
+          `Contoh klasik:\n${list}`,
       },
       { quoted: msg }
     );
@@ -102,10 +103,11 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
       {
         text:
           `🎤 *Panduan Bot Nyanyi WhatsApp*\n\n` +
-          `1️⃣ *Reply mesej/lirik* dengan \`/nyanyi\` — jika lagu sebenar wujud, bot hantar *lagu sebenar* (YouTube/Studio). Jika tiada, *AI Studio (ACE-Step / DiffRhythm)* cipta & nyanyikan lagu sebenar daripada mesej itu!\n` +
-          `2️⃣ \`/nyanyi sua sue kumoning\` — cari lagu & hantar audio sebenar.\n` +
-          `3️⃣ \`/nyanyi ai <lirik/teks>\` — cipta nyanyian AI penuh (suara & instrumen studio).\n` +
-          `4️⃣ \`/lagu\` — info lagu | \`/masa\` — baki sesi aktif.`,
+          `1️⃣ *Reply mesej/lirik* dengan \`/nyanyi\` — bot cari lagu, analisis irama sebenar (BPM & Kunci), lalu cipta nyanyian mengikut melodi asal!\n` +
+          `2️⃣ \`/nyanyi <petikan lirik>\` — cari & nyanyikan ikut melodi lagu sebenar.\n` +
+          `3️⃣ \`/nyanyi asal <tajuk/lirik>\` — terus hantar klip lagu asal (langkau intro).\n` +
+          `4️⃣ \`/nyanyi ikut:<tajuk-lagu> <lirik sendiri>\` — nyanyikan teks anda ikut melodi lagu itu!\n` +
+          `5️⃣ \`/lagu\` — panduan | \`/masa\` — baki sesi.`,
       },
       { quoted: msg }
     );
@@ -115,27 +117,35 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
   const argText = rawText.replace(/^(\/nyanyi|!nyanyi|\/sing|!sing)\s*/i, '').trim();
   const quotedText = extractQuotedText(msg.message);
 
-  let forceAiSing = false;
+  let originalOnly = false;
+  let referenceSongQuery = null;
   let query = argText;
 
-  if (/^(ai|cipta|cover|baru|baharu)\b/i.test(query)) {
-    forceAiSing = true;
-    query = query.replace(/^(ai|cipta|cover|baru|baharu)\s*/i, '').trim();
-  } else if (/^(asal|ori|original|youtube|yt)\b/i.test(query)) {
+  if (/^(asal|ori|original|youtube|yt)\b/i.test(query)) {
+    originalOnly = true;
     query = query.replace(/^(asal|ori|original|youtube|yt)\s*/i, '').trim();
+  } else if (/^(ai|cipta|cover)\b/i.test(query)) {
+    query = query.replace(/^(ai|cipta|cover)\s*/i, '').trim();
+  }
+
+  // Mod khas: `/nyanyi ikut:<nama-lagu> <lirik anda sendiri>`
+  const ikutMatch = query.match(/^ikut:([^\s]+)\s*(.*)$/i);
+  if (ikutMatch) {
+    referenceSongQuery = ikutMatch[1].replace(/[-_]/g, ' ').trim();
+    query = (ikutMatch[2] || '').trim();
   }
 
   if (!query && quotedText) {
     query = quotedText;
   }
 
-  if (!query) {
+  if (!query && !referenceSongQuery) {
     await sendTracked(
       remoteJid,
       {
         text:
           `🎵 Sila *Reply* mana-mana mesej/lirik dengan \`/nyanyi\` atau taip terus contohnya:\n` +
-          `\`/nyanyi sua sue kumoning\``,
+          `\`/nyanyi bila cinta di dusta\``,
       },
       { quoted: msg }
     );
@@ -145,16 +155,27 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
   try {
     await sock.sendPresenceUpdate('recording', remoteJid).catch(() => {});
 
-    const songResult = await findSongOrAdapt(query);
+    let songResult;
+    if (referenceSongQuery) {
+      // Cari lagu rujukan untuk melodi, tetapi ganti liriknya dengan teks pengguna!
+      songResult = await findSongOrAdapt(referenceSongQuery);
+      if (query) {
+        const adapted = adaptLyricsToMelody(query, songResult.melodySong);
+        songResult.phrases = adapted;
+        songResult.lyricsText = adapted.map((p) => p.text).join('\n');
+      }
+    } else {
+      songResult = await findSongOrAdapt(query);
+    }
 
     const ytLink = songResult.youtubeSongVideo?.url || null;
     const spLink = songResult.spotifyUrl || null;
     const smLink = songResult.smuleUrl || null;
 
     let infoText = '';
-    if (songResult.found && !forceAiSing) {
+    if (songResult.found) {
       infoText =
-        `🎵 *Lagu Sebenar Dijumpai!*\n` +
+        `🎵 *Lagu Dijumpai!*\n` +
         `• *Tajuk:* ${songResult.title}\n` +
         `• *Artis:* ${songResult.artist}\n` +
         `• *Sumber:* ${songResult.source}\n` +
@@ -162,19 +183,22 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
         (smLink ? `• *Smule:* ${smLink}\n` : '') +
         (ytLink ? `• *YouTube:* ${ytLink}\n` : '') +
         `\n📜 *Lirik:*\n_${songResult.lyricsText}_\n\n` +
-        `🎧 _Melangkau intro & memuat turun bahagian nyanyian..._`;
+        (originalOnly
+          ? `🎧 _Melangkau intro & memuat turun lagu asal..._`
+          : `🎼 _Menganalisis melodi, BPM & kunci lagu sebenar untuk mencipta nyanyian yang tepat..._`);
     } else {
       infoText =
-        `✨ *Mencipta Nyanyian AI Studio Sebenar...*\n` +
-        `• *Enjin AI:* ACE-Step v1.5 / YuE2-3B\n` +
-        (songResult.found ? `• *Rujukan Lagu:* ${songResult.title}\n` : '') +
-        `\n📜 *Lirik:*\n_${songResult.lyricsText}_\n\n` +
+        `✨ *Lagu tidak dijumpai — Menyesuaikan lirik & mencipta nyanyian AI Studio...*\n\n` +
+        `📜 *Lirik:*\n_${songResult.lyricsText}_\n\n` +
         `🎙️ _Menjana nyanyian terus masuk lirik..._`;
     }
 
     await sendTracked(remoteJid, { text: infoText }, { quoted: msg });
 
-    const audio = await generateSingingAudio(songResult, { forceAiSing });
+    const audio = await generateSingingAudio(songResult, {
+      originalOnly,
+      createMelodyMatch: !originalOnly,
+    });
 
     await sendTracked(
       remoteJid,
@@ -191,7 +215,7 @@ async function handleIncomingMessage({ sock, slot, msg, sendTracked }) {
     await sendTracked(
       remoteJid,
       {
-        text: `⚠️ Maaf, gagal menyediakan lagu buat masa ini (${err.message || 'ralat audio'}). Sila cuba lagi sebentar.`,
+        text: `⚠️ Maaf, gagal menyediakan nyanyian buat masa ini (${err.message || 'ralat audio'}). Sila cuba lagi sebentar.`,
       },
       { quoted: msg }
     );

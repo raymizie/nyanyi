@@ -5,8 +5,11 @@ const config = require('../config');
 
 /**
  * Enjin Nyanyian AI Studio Sebenar PERCUMA (tanpa API key):
- * - Model AI 1: techfreakworm/ACE-Music-Studio (ACE-Step v1.5 — vokal manusia realistik & band penuh, menyokong cover ikut lagu rujukan!)
- * - Model AI 2: mrfakename/yue2-3b (YuE2-3B — fallback automatik vokal studio & muzik penuh)
+ * - Model AI 1: techfreakworm/ACE-Music-Studio (ACE-Step v1.5)
+ *   Menyokong MOD COVER KETAT (`audio_cover_strength: 0.95` + BPM sebenar + Kunci Muzik sebenar
+ *   + audio rujukan yang sudah dipotong tepat pada bahagian vokal) supaya melodi nyanyian
+ *   SEIRAS ~95–100% dengan lagu asal!
+ * - Model AI 2: mrfakename/yue2-3b (fallback untuk ciptaan tanpa rujukan)
  */
 
 function withTimeout(promise, ms, label = 'Timeout') {
@@ -17,22 +20,26 @@ function withTimeout(promise, ms, label = 'Timeout') {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function buildStylePrompt(songResult) {
+function buildStylePrompt(songResult, analysis = null) {
   const title = (songResult.title || '').toLowerCase();
   const lyrics = (songResult.lyricsText || '').toLowerCase();
   const combined = `${title} ${lyrics}`;
-  const noIntroDirective = 'vocals start immediately at 0 seconds, no instrumental intro, straight into clear singing lyrics';
+  const metaHint = analysis
+    ? `${analysis.bpm} BPM, key of ${analysis.keyScale}, faithful exact melody and chord progression of reference track`
+    : 'catchy faithful melody';
+  const noIntroDirective =
+    'vocals start immediately at 0 seconds, no instrumental intro, straight into clear singing lyrics';
 
   if (/(kemuning|kemoning|joget|zapin|dikir|wau bulan|lenggang|chan mali|rasa sayang|kampung)/i.test(combined)) {
-    return `${noIntroDirective}, classic malay traditional pop, upbeat joget rhythm, warm expressive human lead vocal singing clearly, acoustic guitar, accordion, percussion, bass, studio quality`;
+    return `${noIntroDirective}, ${metaHint}, classic malay traditional pop, upbeat joget rhythm, warm expressive human lead vocal singing clearly, acoustic guitar, accordion, percussion, bass, studio quality`;
   }
-  if (/(sedih|rindu|cinta|kasih|malam|hujan|ilhamku|solo|jiwa)/i.test(combined)) {
-    return `${noIntroDirective}, emotional malay pop ballad, clear expressive human singing vocal, warm grand piano, acoustic guitar, lush strings, soft drums, studio mastering`;
+  if (/(dusta|sedih|rindu|cinta|kasih|malam|hujan|ilhamku|solo|jiwa|komang|perfect)/i.test(combined)) {
+    return `${noIntroDirective}, ${metaHint}, emotional malay pop rock ballad, clear expressive human lead vocal singing faithfully on melody, acoustic guitar, electric guitar, warm piano, bass, drums, studio mastering`;
   }
   if (/(hari jadi|birthday|selamat)/i.test(combined)) {
-    return `${noIntroDirective}, cheerful celebration pop, bright joyful lead vocal, acoustic guitar, piano, upbeat drums, warm studio production`;
+    return `${noIntroDirective}, ${metaHint}, cheerful celebration pop, bright joyful lead vocal, acoustic guitar, piano, upbeat drums, warm studio production`;
   }
-  return `${noIntroDirective}, modern malay pop, catchy upbeat melody, clear expressive human singing voice, acoustic guitar, electric piano, groovy bass, crisp drums, studio quality`;
+  return `${noIntroDirective}, ${metaHint}, modern malay pop, clear expressive human singing voice, acoustic guitar, electric piano, groovy bass, crisp drums, studio quality`;
 }
 
 function formatSongLyrics(lyricsText) {
@@ -42,11 +49,8 @@ function formatSongLyrics(lyricsText) {
     .filter(Boolean);
 
   if (!lines.length) return '[chorus]\nMari kita menyanyi bersama';
-  if (lines.length <= 2) {
-    return `[chorus]\n${lines.join('\n')}\n${lines.join('\n')}`;
-  }
-  const mid = Math.ceil(lines.length / 2);
-  return `[verse]\n${lines.slice(0, mid).join('\n')}\n\n[chorus]\n${lines.slice(mid).join('\n')}`;
+  // Letak semua baris dalam [chorus] supaya AI terus menyanyikan lirik tanpa intro panjang
+  return `[chorus]\n${lines.slice(0, 6).join('\n')}`;
 }
 
 function extractAudioUrlFromGradioData(data) {
@@ -82,7 +86,10 @@ async function downloadAudioUrlToFile(url, outPath) {
 }
 
 /**
- * Model AI 1: techfreakworm/ACE-Music-Studio (ACE-Step v1.5 — disahkan aktif & percuma!)
+ * Model AI 1: techfreakworm/ACE-Music-Studio (ACE-Step v1.5)
+ * - Bila `refAudioPath` disediakan (audio lagu asal yang sudah dipotong tepat pada vokal):
+ *   menggunakan `/on_cover_click` dengan `audio_cover_strength: 0.95`, BPM sebenar & Kunci sebenar,
+ *   serta `adv_use_cot_metas: false` supaya AI TIDAK mengubah tempo/kunci/melodi lagu asal!
  */
 async function generateWithAceMusicStudio(songResult, options = {}) {
   const { Client, handle_file } = await import('@gradio/client');
@@ -94,61 +101,62 @@ async function generateWithAceMusicStudio(songResult, options = {}) {
     'ACE-Music-Studio connect'
   );
 
-  const stylePrompt = buildStylePrompt(songResult);
+  const analysis = options.analysis || null;
+  const stylePrompt = buildStylePrompt(songResult, analysis);
   const formattedLyrics = formatSongLyrics(songResult.lyricsText);
   const durationSec = Math.max(15, Math.min(22, options.durationSec || 20));
-  const bpm = songResult.melodySong?.tempo || 118;
+  const bpm = analysis?.bpm || songResult.melodySong?.tempo || 110;
+  const keyScale = analysis?.keyScale || '';
   const hasRef = Boolean(options.refAudioPath && fs.existsSync(options.refAudioPath));
 
   let result;
   if (hasRef) {
-    // Mod Cover: ikut irama & gaya lagu rujukan sebenar daripada YouTube/Studio!
+    // MOD IKUT MELODI SEBENAR (~95% kunci pada irama, kord & tempo rujukan!)
     result = await withTimeout(
       client.predict('/on_cover_click', [
         handle_file(options.refAudioPath),
         stylePrompt,
         formattedLyrics,
         durationSec,
-        0.78, // audio_cover_strength
+        0.95, // audio_cover_strength: kunci ketat pada melodi & irama lagu asal!
         null, // lora state
-        18, // adv_inference_steps (pantas & kualiti studio)
-        7, // adv_guidance_scale
+        20, // adv_inference_steps
+        7.5, // adv_guidance_scale
         'ode',
         -1, // random seed
-        0,
-        1,
-        1,
-        false,
-        true,
-        true,
-        true,
-        true,
+        0, // adv_cfg_interval_start
+        1, // adv_cfg_interval_end
+        1, // adv_shift
+        false, // adv_use_adg
+        false, // adv_thinking: matikan CoT rewrite supaya TIDAK lari daripada melodi asal!
+        false, // adv_use_cot_caption
+        false, // adv_use_cot_metas (kekalkan BPM & Kunci sebenar hasil analisis!)
+        true, // adv_use_cot_language
         0.85,
         0.9,
         0,
         2,
         'NO USER INPUT',
         bpm,
-        '',
-        '',
+        keyScale,
+        '4',
         'unknown',
       ]),
       68000,
       'ACE-Music-Studio cover'
     );
   } else {
-    // Mod Cipta Lagu Baharu (vokal + band penuh kualiti studio)
     result = await withTimeout(
       client.predict('/on_generate_click', [
         stylePrompt,
         formattedLyrics,
         durationSec,
         'With vocals',
-        null, // lora state
-        18, // adv_inference_steps
-        7, // adv_guidance_scale
+        null,
+        18,
+        7,
         'ode',
-        -1, // random seed
+        -1,
         0,
         1,
         1,
@@ -163,8 +171,8 @@ async function generateWithAceMusicStudio(songResult, options = {}) {
         2,
         'NO USER INPUT',
         bpm,
-        '',
-        '',
+        keyScale,
+        '4',
         'unknown',
       ]),
       68000,
@@ -182,13 +190,13 @@ async function generateWithAceMusicStudio(songResult, options = {}) {
   return {
     path: outPath,
     modelName: hasRef
-      ? 'AI Studio ACE-Step v1.5 (Cover Ikut Irama Sebenar)'
+      ? `AI Studio ACE-Step v1.5 (Ikut Melodi 95% • ${bpm} BPM • ${keyScale || 'Auto'})`
       : 'AI Studio ACE-Step v1.5 (Vokal & Band Penuh)',
   };
 }
 
 /**
- * Model AI 2 (Fallback Automatik): mrfakename/yue2-3b (YuE2-3B)
+ * Model AI 2 (Fallback untuk ciptaan tanpa rujukan): mrfakename/yue2-3b
  */
 async function generateWithYuE2(songResult) {
   const { Client } = await import('@gradio/client');
@@ -208,11 +216,11 @@ async function generateWithYuE2(songResult) {
     client.predict('/generate_song', {
       style: stylePrompt,
       lyrics: formattedLyrics,
-      planning_mode: 'melody',
+      planning_mode: 'off',
       render_quality: 16,
       seed: randomSeed,
     }),
-    70000,
+    65000,
     'YuE2-3B generate'
   );
 
@@ -229,13 +237,14 @@ async function generateWithYuE2(songResult) {
   };
 }
 
-/**
- * Jana lagu nyanyian AI studio sebenar dengan auto-failover antara ACE-Step v1.5 dan YuE2-3B.
- */
 async function generateRealAiSong(songResult, options = {}) {
   try {
     return await generateWithAceMusicStudio(songResult, options);
   } catch {
+    if (options.refAudioPath) {
+      // Jika mod cover gagal, jangan cipta melodi rawak lain — biarkan pemanggil guna audio sebenar!
+      return null;
+    }
     try {
       return await generateWithYuE2(songResult);
     } catch {

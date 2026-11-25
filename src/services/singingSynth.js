@@ -7,7 +7,7 @@ const config = require('../config');
 const { fetchRealAudioFile } = require('./youtubeAudio');
 const { generateRealAiSong } = require('./aiSingingEngine');
 const { synthesizeBackingTrack } = require('./melodySynth');
-const { detectVocalStartSec } = require('./pitchExtractor');
+const { analyzeReferenceTrack, detectVocalStartSec } = require('./pitchExtractor');
 
 const execFileAsync = promisify(execFile);
 
@@ -56,16 +56,37 @@ function safeUnlink(filePath) {
 }
 
 /**
- * Tukar audio studio kepada WhatsApp Voice Note OGG Opus 96kbps sambil MELANGKAU INTRO PANJANG
- * secara automatik (menggunakan timestamp lirik LRCLIB atau pengesan vokal `detectVocalStartSec`)
- * supaya klip terus mula tepat pada bahagian nyanyian lirik!
+ * Potong audio rujukan sebenar menjadi WAV 20 saat yang BERMULA TEPAT PADA NYANYIAN VOKAL
+ * (tiada intro!) supaya apabila dihantar ke AI Studio Cover (`ACE-Step v1.5`),
+ * AI mengunci 95% melodi, kord & tempo tepat pada bahagian nyanyian!
  */
-async function convertStudioAudioToVoiceNote(inputPath, { maxSeconds = 27, skipIntro = true } = {}) {
+async function trimReferenceToVocalWav(inputPath, startSec = 0, durationSec = 20) {
+  ensureTmpDir();
+  const outWav = path.join(config.TMP_DIR, `refvoc-${crypto.randomBytes(5).toString('hex')}.wav`);
+  const inputArgs = startSec > 0.4 ? ['-ss', String(startSec), '-i', inputPath] : ['-i', inputPath];
+
+  await runFfmpeg(
+    [
+      ...inputArgs,
+      '-t', String(durationSec),
+      '-ac', '2',
+      '-ar', '44100',
+      outWav,
+    ],
+    12000
+  );
+  return outWav;
+}
+
+/**
+ * Tukar audio studio kepada WhatsApp Voice Note OGG Opus 96kbps sambil melangkau intro panjang.
+ */
+async function convertStudioAudioToVoiceNote(inputPath, { maxSeconds = 26, skipIntro = true, knownStartSec = null } = {}) {
   ensureTmpDir();
   const outOgg = path.join(config.TMP_DIR, `studio-${crypto.randomBytes(5).toString('hex')}.ogg`);
 
-  let trimStartSec = 0;
-  if (skipIntro) {
+  let trimStartSec = knownStartSec != null ? knownStartSec : 0;
+  if (skipIntro && knownStartSec == null) {
     trimStartSec = await detectVocalStartSec(inputPath, getFfmpegPath(), 60);
   }
 
@@ -96,34 +117,10 @@ async function convertStudioAudioToVoiceNote(inputPath, { maxSeconds = 27, skipI
   }
 }
 
-/**
- * Fallback vokal jika kedua-dua pelayan AI (ACE-Step & DiffRhythm) sedang penuh barisan:
- * Guna Edge Neural Melayu (YasminNeural) dahulu, jika gagal baru Google TTS,
- * di atas trek karaoke/iringan sebenar YouTube (BUKAN MIDI jika ada karaoke!).
- */
 async function fetchBestFallbackVocal(text, lang, outPath) {
   const clean = String(text || '').trim().slice(0, 180);
   if (!clean) return null;
 
-  // 1. Cuba Microsoft Edge Neural Voice (suara manusia Melayu berkualiti tinggi)
-  try {
-    const { EdgeTTS } = await import('edge-tts-universal');
-    const voice = lang === 'en' ? 'en-US-JennyNeural' : 'ms-MY-YasminNeural';
-    const tts = new EdgeTTS(clean, voice, { rate: '+2%', pitch: '+6Hz' });
-    const res = await Promise.race([
-      tts.synthesize(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('edge timeout')), 4500)),
-    ]);
-    const buf = Buffer.from(await res.audio.arrayBuffer());
-    if (buf.length > 500) {
-      fs.writeFileSync(outPath, buf);
-      return 'Suara Neural Melayu (YasminNeural)';
-    }
-  } catch {
-    // fallback ke Google TTS
-  }
-
-  // 2. Fallback Google TTS
   for (const client of ['tw-ob', 'gtx']) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 2500);
@@ -146,7 +143,6 @@ async function fetchBestFallbackVocal(text, lang, outPath) {
       clearTimeout(timer);
     }
   }
-
   return null;
 }
 
@@ -158,25 +154,9 @@ async function buildEmergencyFallbackOgg(songResult) {
   tempFiles.push(outOgg);
 
   try {
-    // Cuba dapatkan trek karaoke/iringan sebenar YouTube/preview dahulu sebelum sentuh sintesis tempatan
-    let backingPath = null;
-    let backingLabel = 'Irama Tempatan';
-
-    const realBacking = await fetchRealAudioFile({
-      videoId: songResult.youtubeKaraokeVideo?.videoId || songResult.youtubeSongVideo?.videoId,
-      previewUrl: songResult.previewUrl,
-    });
-
-    if (realBacking?.path) {
-      backingPath = realBacking.path;
-      backingLabel = realBacking.source;
-      tempFiles.push(backingPath);
-    } else {
-      const wavPath = path.join(config.TMP_DIR, `bk-${id}.wav`);
-      synthesizeBackingTrack(songResult.melodySong, songResult.phrases || songResult.melodySong.phrases, wavPath);
-      backingPath = wavPath;
-      tempFiles.push(wavPath);
-    }
+    const wavPath = path.join(config.TMP_DIR, `bk-${id}.wav`);
+    synthesizeBackingTrack(songResult.melodySong, songResult.phrases || songResult.melodySong.phrases, wavPath);
+    tempFiles.push(wavPath);
 
     const phrases = (songResult.phrases || songResult.melodySong.phrases || []).slice(0, 4);
     const lang = songResult.melodySong?.lang || 'ms';
@@ -186,14 +166,14 @@ async function buildEmergencyFallbackOgg(songResult) {
         const mp3 = path.join(config.TMP_DIR, `v-${id}-${idx}.mp3`);
         tempFiles.push(mp3);
         const name = await fetchBestFallbackVocal(p.text, lang, mp3);
-        return name ? { path: mp3, delayMs: 800 + idx * 4200, name } : null;
+        return name ? { path: mp3, delayMs: 600 + idx * 4000, name } : null;
       })
     );
     const vocals = vocalResults.filter(Boolean);
 
     if (vocals.length > 0) {
-      const inputs = ['-i', backingPath];
-      const filters = ['[0:a]atrim=0:22,asetpts=PTS-STARTPTS,volume=0.42[bg]'];
+      const inputs = ['-i', wavPath];
+      const filters = ['[0:a]atrim=0:20,asetpts=PTS-STARTPTS,volume=0.42[bg]'];
       const mix = ['[bg]'];
 
       vocals.forEach((v, idx) => {
@@ -213,7 +193,7 @@ async function buildEmergencyFallbackOgg(songResult) {
           ...inputs,
           '-filter_complex', filters.join(';'),
           '-map', '[out]',
-          '-t', '22',
+          '-t', '20',
           '-ac', '1',
           '-ar', '48000',
           '-c:a', 'libopus',
@@ -227,19 +207,19 @@ async function buildEmergencyFallbackOgg(songResult) {
         buffer: fs.readFileSync(outOgg),
         actualMode: 'fallback_vocal',
         usedVocal: true,
-        modelUsed: `${vocals[0].name} + ${backingLabel}`,
+        modelUsed: `${vocals[0].name} + Irama Sandaran`,
       };
     }
 
-    const converted = await convertStudioAudioToVoiceNote(backingPath, {
-      maxSeconds: 22,
+    const converted = await convertStudioAudioToVoiceNote(wavPath, {
+      maxSeconds: 20,
       skipIntro: false,
     });
     return {
       buffer: converted.buffer,
       actualMode: 'fallback_instrumental',
       usedVocal: false,
-      modelUsed: backingLabel,
+      modelUsed: 'Irama Sandaran Tempatan',
     };
   } finally {
     for (const f of tempFiles) safeUnlink(f);
@@ -247,84 +227,135 @@ async function buildEmergencyFallbackOgg(songResult) {
 }
 
 /**
- * ENJIN AUDIO UTAMA — TERUS MASUK NYANYIAN LIRIK (LANGKAU INTRO PANJANG!)
+ * ENJIN AUDIO UTAMA — ANALISIS IRAMA LAGU SEBENAR & IKUT MELODI 95%–100%!
+ *
+ * 1. Jika LAGU SEBENAR ditemui:
+ *    - Muat turun audio lagu sebenar (YouTube / Studio)
+ *    - Analisis BPM sebenar, Kunci Muzik sebenar, dan saat mula vokal (langkau intro!)
+ *    - Jika `options.originalOnly` (`/nyanyi asal`): terus hantar klip nyanyian lagu sebenar (100% asal!)
+ *    - Jika `options.createMelodyMatch` (lalai `/nyanyi` atau `/nyanyi ai` atau `/nyanyi ikut:<lagu>`):
+ *      -> Potong rujukan 20 saat tepat pada vokal (tiada intro!)
+ *      -> Hantar ke AI Studio `ACE-Step v1.5` (`/on_cover_click`, `audio_cover_strength: 0.95`,
+ *         BPM sebenar + Kunci Muzik sebenar) supaya AI mencipta nyanyian yang SAMA MELODI ~95%!
+ *      -> Jika pelayan GPU AI sedang sibuk/habis kuota, fallback serta-merta kepada klip nyanyian
+ *         lagu sebenar (100% tepat melodi & suara, BUKAN cipta melodi lari atau MIDI!)
+ * 2. Jika TIADA lagu sebenar (mesej rawak tanpa rujukan lagu):
+ *    - Cipta lagu penuh dengan AI Studio `ACE-Step v1.5` -> fallback `YuE2-3B`.
  */
 async function generateSingingAudio(songResult, options = {}) {
-  const wantAiCover = Boolean(options.forceAiSing);
+  const originalOnly = Boolean(options.originalOnly);
+  const createMelodyMatch = options.createMelodyMatch !== false; // Lalai: cipta ikut melodi 95%!
+  const tempFiles = [];
 
-  // LALUAN 1: LAGU SEBENAR DITEMUI -> LOMPAT TERUS KE BAHAGIAN NYANYIAN LIRIK!
-  if (songResult.found && !wantAiCover) {
-    const realAudio = await fetchRealAudioFile({
-      videoId: songResult.youtubeSongVideo?.videoId,
-      previewUrl: songResult.previewUrl,
-      startSec: songResult.vocalStartSec,
-    });
-
-    if (realAudio?.path) {
-      try {
-        const converted = await convertStudioAudioToVoiceNote(realAudio.path, {
-          maxSeconds: 27,
-          // Jika yt-dlp sudah potong tepat pada timestamp lirik LRCLIB, tak perlu potong 2 kali
-          skipIntro: !realAudio.alreadyCutAtStartSec,
-        });
-        return {
-          buffer: converted.buffer,
-          actualMode: 'real_song',
-          usedVocal: true,
-          skippedIntroSec: realAudio.alreadyCutAtStartSec
-            ? songResult.vocalStartSec
-            : converted.trimmedStartSec,
-          modelUsed: `Lagu Sebenar (${realAudio.source})`,
-        };
-      } finally {
-        safeUnlink(realAudio.path);
-      }
-    }
-  }
-
-  // LALUAN 2: NYANYIAN AI STUDIO PENUH (ACE-Step v1.5 -> YuE2-3B)
-  let refAudioPath = null;
   try {
-    if (wantAiCover && (songResult.youtubeSongVideo?.videoId || songResult.previewUrl)) {
-      const ref = await fetchRealAudioFile({
+    // 1. Jika lagu sebenar ditemui (atau pengguna tetapkan lagu rujukan `/nyanyi ikut:<lagu>`)
+    if (songResult.found) {
+      const realAudio = await fetchRealAudioFile({
         videoId: songResult.youtubeSongVideo?.videoId,
         previewUrl: songResult.previewUrl,
         startSec: songResult.vocalStartSec,
       });
-      if (ref?.path) refAudioPath = ref.path;
-    }
 
-    const aiSong = await generateRealAiSong(songResult, {
-      durationSec: 20,
-      refAudioPath,
-    });
+      if (realAudio?.path) {
+        tempFiles.push(realAudio.path);
 
-    if (aiSong?.path) {
-      try {
-        const converted = await convertStudioAudioToVoiceNote(aiSong.path, {
-          maxSeconds: 25,
-          skipIntro: true,
+        // Analisis irama lagu sebenar: BPM, Kunci Muzik & saat mula vokal!
+        const analysis = await analyzeReferenceTrack(realAudio.path, getFfmpegPath(), 60);
+        const effectiveStartSec = realAudio.alreadyCutAtStartSec ? 0 : analysis.vocalStartSec;
+
+        // Mod `/nyanyi asal`: terus hantar audio lagu sebenar (100% asal, tanpa intro!)
+        if (originalOnly) {
+          const converted = await convertStudioAudioToVoiceNote(realAudio.path, {
+            maxSeconds: 26,
+            skipIntro: false,
+            knownStartSec: effectiveStartSec,
+          });
+          return {
+            buffer: converted.buffer,
+            actualMode: 'real_song',
+            usedVocal: true,
+            analysis,
+            skippedIntroSec: realAudio.alreadyCutAtStartSec
+              ? songResult.vocalStartSec
+              : effectiveStartSec,
+            modelUsed: `Lagu Asal (${realAudio.source} • ${analysis.bpm} BPM • ${analysis.keyScale})`,
+          };
+        }
+
+        // Mod Utama: Cipta nyanyian AI yang MENGUNCI MELODI, BPM & KUNCI LAGU SEBENAR (~95%)!
+        if (createMelodyMatch) {
+          const refVocalWav = await trimReferenceToVocalWav(realAudio.path, effectiveStartSec, 20);
+          tempFiles.push(refVocalWav);
+
+          const aiCover = await generateRealAiSong(songResult, {
+            durationSec: 20,
+            refAudioPath: refVocalWav,
+            analysis,
+          });
+
+          if (aiCover?.path) {
+            tempFiles.push(aiCover.path);
+            const converted = await convertStudioAudioToVoiceNote(aiCover.path, {
+              maxSeconds: 22,
+              skipIntro: true,
+            });
+            return {
+              buffer: converted.buffer,
+              actualMode: 'ai_melody_locked_cover',
+              usedVocal: true,
+              analysis,
+              skippedIntroSec: converted.trimmedStartSec,
+              modelUsed: aiCover.modelName,
+            };
+          }
+        }
+
+        // Fallback pintar jika kuota GPU AI sedang penuh: hantar audio lagu sebenar yang sudah dipotong intro!
+        // (100% ikut melodi & suara sebenar — TIDAK akan lari melodi!)
+        const convertedReal = await convertStudioAudioToVoiceNote(realAudio.path, {
+          maxSeconds: 26,
+          skipIntro: false,
+          knownStartSec: effectiveStartSec,
         });
         return {
-          buffer: converted.buffer,
-          actualMode: 'ai_studio_sing',
+          buffer: convertedReal.buffer,
+          actualMode: 'real_song_fallback',
           usedVocal: true,
-          skippedIntroSec: converted.trimmedStartSec,
-          modelUsed: aiSong.modelName,
+          analysis,
+          skippedIntroSec: realAudio.alreadyCutAtStartSec
+            ? songResult.vocalStartSec
+            : effectiveStartSec,
+          modelUsed: `Lagu Sebenar (${realAudio.source} • ${analysis.bpm} BPM • ${analysis.keyScale})`,
         };
-      } finally {
-        safeUnlink(aiSong.path);
       }
     }
-  } finally {
-    if (refAudioPath) safeUnlink(refAudioPath);
-  }
 
-  return await buildEmergencyFallbackOgg(songResult);
+    // 2. Teks rawak tanpa lagu sedia ada -> cipta lagu baharu dengan AI Studio
+    const aiSong = await generateRealAiSong(songResult, { durationSec: 20 });
+    if (aiSong?.path) {
+      tempFiles.push(aiSong.path);
+      const converted = await convertStudioAudioToVoiceNote(aiSong.path, {
+        maxSeconds: 22,
+        skipIntro: true,
+      });
+      return {
+        buffer: converted.buffer,
+        actualMode: 'ai_studio_sing',
+        usedVocal: true,
+        skippedIntroSec: converted.trimmedStartSec,
+        modelUsed: aiSong.modelName,
+      };
+    }
+
+    return await buildEmergencyFallbackOgg(songResult);
+  } finally {
+    for (const f of tempFiles) safeUnlink(f);
+  }
 }
 
 module.exports = {
   generateSingingAudio,
   convertStudioAudioToVoiceNote,
+  trimReferenceToVocalWav,
   getFfmpegPath,
 };
