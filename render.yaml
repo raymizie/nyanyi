@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: bot-nyanyi-whatsapp
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MAX_SLOTS
+        value: "10"
+      - key: SESSION_DURATION_MINUTES
+        value: "60"
+      - key: BOT_NAME
+        value: "Bot Nyanyi WhatsApp"

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ms">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bot Nyanyi WhatsApp</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <h1 class="title">
+        <span class="title-icon" aria-hidden="true">🎤</span>
+        <span id="botTitle">Bot Nyanyi WhatsApp</span>
+      </h1>
+
+      <div class="stats-bar">
+        <div class="stat-pill">
+          <span class="pill-icon">👥</span>
+          <span>Pengguna Aktif:</span>
+          <strong id="activeCount" class="accent">0 / 10</strong>
+        </div>
+        <div class="stat-pill">
+          <span class="pill-icon">🟢</span>
+          <span>Slot Kosong:</span>
+          <strong id="freeCount" class="accent">10</strong>
+        </div>
+        <div class="stat-pill">
+          <span class="pill-icon">⏱️</span>
+          <span>Had Masa:</span>
+          <strong id="sessionLimit" class="accent">60 minit / sesi</strong>
+        </div>
+      </div>
+    </header>
+
+    <main class="dashboard-grid">
+      <!-- Kad Kiri: Pautkan Peranti Baharu -->
+      <section class="card card-qr">
+        <h2 class="card-heading">Pautkan Peranti Baharu</h2>
+
+        <div class="qr-status-wrap">
+          <div id="qrStatusPill" class="status-pill status-waiting">
+            ⏳ MENJANA KOD QR (Slot #1 / 10)
+          </div>
+        </div>
+
+        <p class="qr-instructions">
+          Buka <strong>WhatsApp</strong> di telefon &rarr;
+          <strong>Peranti Dipautkan (Linked Devices)</strong> &rarr;
+          <strong>Pautkan Peranti</strong> &rarr; imbas QR di bawah:
+        </p>
+
+        <div class="qr-frame" id="qrFrame">
+          <div class="qr-loading" id="qrLoading">
+            <div class="spinner"></div>
+            <span>Menjana kod QR WhatsApp...</span>
+          </div>
+          <img id="qrImage" class="qr-image hidden" alt="Kod QR WhatsApp" />
+          <div id="qrFullMsg" class="qr-full hidden">
+            <strong>Semua slot sedang digunakan.</strong>
+            <span>Sila tunggu satu slot tamat tempoh atau terputus.</span>
+          </div>
+        </div>
+
+        <p class="qr-note">
+          ⏱️ Tempoh aktif setiap pengguna ialah <strong id="noteMinutes">60 minit (1 jam)</strong> sebelum auto-logout.
+        </p>
+        <p class="qr-subnote">
+          Selepas anda berjaya imbas, kod QR baharu akan dijana untuk pengguna seterusnya.
+        </p>
+
+        <div class="qr-actions">
+          <button id="regenBtn" class="btn-secondary" type="button">
+            <span>🔄</span>
+            <span>Jana Semula Kod QR</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Kad Kanan: Info Pengguna Aktif -->
+      <section class="card card-active">
+        <div class="card-header-row">
+          <h2 class="card-heading">
+            <span class="heading-icon">👥</span>
+            Info Pengguna Aktif
+          </h2>
+          <span id="slotSummaryText" class="muted-label">0 daripada 10 slot</span>
+        </div>
+
+        <div id="activeUsersBox" class="active-users-box">
+          <div class="empty-state">
+            <p class="empty-title">Tiada pengguna sedang bersambung buat masa ini.</p>
+            <p class="empty-sub">Imbas kod QR di sebelah untuk mula menggunakan Bot Nyanyi.</p>
+          </div>
+        </div>
+
+        <hr class="divider" />
+
+        <div class="tip-box">
+          <p>
+            <strong>Tip guna di WhatsApp:</strong>
+            <strong>Reply</strong> mana-mana teks atau lirik dengan <code>/nyanyi</code>, atau taip
+            <code>/nyanyi sua sue kumoning</code> untuk cari lagu &amp; nyanyi ikut irama sebenar.
+            Taip <code>/nyanyi suara &lt;teks&gt;</code> untuk nyanyian suara bot,
+            <code>/lagu</code> untuk senarai irama, dan <code>/masa</code> untuk semak baki sesi.
+          </p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

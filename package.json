@@ -1,0 +1,22 @@
+{
+  "name": "bot-nyanyi-whatsapp",
+  "version": "1.0.0",
+  "description": "Bot WhatsApp yang mengenal pasti lagu daripada lirik/mesej, menyesuaikan lirik jika tidak dijumpai, dan menyanyikannya mengikut irama sebenar. Sesuai untuk GitHub & Render dengan dashboard QR 10 slot.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test:engine": "node scripts/test-engine.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.16",
+    "express": "^4.21.2",
+    "ffmpeg-static": "^5.2.0",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4"
+  }
+}
